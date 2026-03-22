@@ -1,0 +1,7 @@
+## Append samples of your project ##
+resources:
+- sip_v1alpha1_sipinboundtrunk.yaml
+- sip_v1alpha1_sipoutboundtrunk.yaml
+- sip_v1alpha1_sipdispatchrule.yaml
+- sip_v1alpha1_egressconfig.yaml
+# +kubebuilder:scaffold:manifestskustomizesamples

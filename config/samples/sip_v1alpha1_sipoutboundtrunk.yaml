@@ -1,0 +1,17 @@
+apiVersion: sip.livekit-sip.io/v1alpha1
+kind: SIPOutboundTrunk
+metadata:
+  labels:
+    app.kubernetes.io/name: livekit-sip-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: sipoutboundtrunk-sample
+spec:
+  livekitRef:
+    service: livekit-server
+    secretName: livekit-credentials
+  name: my-outbound-trunk
+  address: sip.provider.example.com
+  transport: udp
+  numbers:
+    - "+15559876543"
+  mediaEncryption: disable

@@ -1,0 +1,18 @@
+apiVersion: sip.livekit-sip.io/v1alpha1
+kind: SIPInboundTrunk
+metadata:
+  labels:
+    app.kubernetes.io/name: livekit-sip-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: sipinboundtrunk-sample
+spec:
+  livekitRef:
+    service: livekit-server
+    secretName: livekit-credentials
+  name: my-inbound-trunk
+  numbers:
+    - "+15551234567"
+  allowedAddresses:
+    - "0.0.0.0/0"
+  mediaEncryption: allow
+  includeHeaders: x-headers
