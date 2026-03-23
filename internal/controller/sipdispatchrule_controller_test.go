@@ -51,7 +51,17 @@ var _ = Describe("SIPDispatchRule Controller", func() {
 						Name:      resourceName,
 						Namespace: "default",
 					},
-					// TODO(user): Specify other spec details if needed.
+					Spec: sipv1alpha1.SIPDispatchRuleSpec{
+						LivekitRef: sipv1alpha1.LivekitReference{
+							Service:    "livekit-server",
+							SecretName: "livekit-credentials",
+						},
+						Name: "test-dispatch-rule",
+						Type: "direct",
+						Direct: &sipv1alpha1.SIPDispatchRuleDirect{
+							RoomName: "test-room",
+						},
+					},
 				}
 				Expect(k8sClient.Create(ctx, resource)).To(Succeed())
 			}

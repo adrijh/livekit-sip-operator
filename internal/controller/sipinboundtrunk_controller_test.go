@@ -51,7 +51,14 @@ var _ = Describe("SIPInboundTrunk Controller", func() {
 						Name:      resourceName,
 						Namespace: "default",
 					},
-					// TODO(user): Specify other spec details if needed.
+					Spec: sipv1alpha1.SIPInboundTrunkSpec{
+						LivekitRef: sipv1alpha1.LivekitReference{
+							Service:    "livekit-server",
+							SecretName: "livekit-credentials",
+						},
+						Name:    "test-inbound-trunk",
+						Numbers: []string{"+15551234567"},
+					},
 				}
 				Expect(k8sClient.Create(ctx, resource)).To(Succeed())
 			}

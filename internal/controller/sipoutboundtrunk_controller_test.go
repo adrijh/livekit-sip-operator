@@ -51,7 +51,15 @@ var _ = Describe("SIPOutboundTrunk Controller", func() {
 						Name:      resourceName,
 						Namespace: "default",
 					},
-					// TODO(user): Specify other spec details if needed.
+					Spec: sipv1alpha1.SIPOutboundTrunkSpec{
+						LivekitRef: sipv1alpha1.LivekitReference{
+							Service:    "livekit-server",
+							SecretName: "livekit-credentials",
+						},
+						Name:    "test-outbound-trunk",
+						Address: "sip.example.com",
+						Numbers: []string{"+15559876543"},
+					},
 				}
 				Expect(k8sClient.Create(ctx, resource)).To(Succeed())
 			}
