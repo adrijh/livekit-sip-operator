@@ -22,6 +22,14 @@ rules:
 - apiGroups:
   - sip.livekit-sip.io
   resources:
+  - egressconfigs
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - sip.livekit-sip.io
+  resources:
   - sipdispatchrules
   - sipinboundtrunks
   - sipoutboundtrunks

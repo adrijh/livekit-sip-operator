@@ -71,6 +71,80 @@ type SIPDispatchRuleCallee struct {
 	Randomize bool `json:"randomize,omitempty"`
 }
 
+// EgressConfigReference references an EgressConfig resource.
+type EgressConfigReference struct {
+	// Name of the EgressConfig resource.
+	// +kubebuilder:validation:Required
+	Name string `json:"name"`
+}
+
+// AudioMixingType defines the audio mixing mode for room composite egress.
+// +kubebuilder:validation:Enum=DEFAULT_MIXING
+type AudioMixingType string
+
+const (
+	AudioMixingDefault AudioMixingType = "DEFAULT_MIXING"
+)
+
+// FileOutput defines a file output for room composite egress.
+type FileOutput struct {
+	// File path template (e.g. "recordings/{room_id}/recording.ogg").
+	// +kubebuilder:validation:Required
+	Filepath string `json:"filepath"`
+
+	// Reference to an EgressConfig resource defining the storage backend.
+	// +kubebuilder:validation:Required
+	EgressConfigRef EgressConfigReference `json:"egressConfigRef"`
+}
+
+// RoomCompositeEgress defines room composite egress configuration.
+type RoomCompositeEgress struct {
+	// Room name.
+	// +optional
+	RoomName string `json:"roomName,omitempty"`
+
+	// Record audio only.
+	// +optional
+	AudioOnly bool `json:"audioOnly,omitempty"`
+
+	// Audio mixing mode.
+	// +optional
+	AudioMixing AudioMixingType `json:"audioMixing,omitempty"`
+
+	// File outputs for this egress.
+	// +optional
+	FileOutputs []FileOutput `json:"fileOutputs,omitempty"`
+}
+
+// RoomEgressConfig defines the egress configuration for a room.
+type RoomEgressConfig struct {
+	// Room composite egress configuration.
+	// +optional
+	Room *RoomCompositeEgress `json:"room,omitempty"`
+}
+
+// RoomAgentDispatchConfig defines an agent to dispatch to the room.
+type RoomAgentDispatchConfig struct {
+	// Name of the agent to dispatch.
+	// +kubebuilder:validation:Required
+	AgentName string `json:"agentName"`
+
+	// Metadata to pass to the agent.
+	// +optional
+	Metadata string `json:"metadata,omitempty"`
+}
+
+// RoomConfig defines room configuration for a dispatch rule.
+type RoomConfig struct {
+	// Agents to dispatch to the room.
+	// +optional
+	Agents []RoomAgentDispatchConfig `json:"agents,omitempty"`
+
+	// Egress configuration for the room.
+	// +optional
+	Egress *RoomEgressConfig `json:"egress,omitempty"`
+}
+
 // SIPDispatchRuleSpec defines the desired state of a SIP dispatch rule.
 type SIPDispatchRuleSpec struct {
 	// Reference to a Secret containing LiveKit server credentials (keys: url, api-key, api-secret).
@@ -132,6 +206,10 @@ type SIPDispatchRuleSpec struct {
 	// Media encryption mode.
 	// +optional
 	MediaEncryption SIPMediaEncryption `json:"mediaEncryption,omitempty"`
+
+	// Room configuration applied when the dispatch rule creates or joins a room.
+	// +optional
+	RoomConfig *RoomConfig `json:"roomConfig,omitempty"`
 }
 
 // SIPDispatchRuleStatus defines the observed state of a SIP dispatch rule.

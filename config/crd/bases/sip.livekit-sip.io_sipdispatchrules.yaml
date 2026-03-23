@@ -152,6 +152,70 @@ spec:
                 items:
                   type: string
                 type: array
+              roomConfig:
+                description: Room configuration applied when the dispatch rule creates
+                  or joins a room.
+                properties:
+                  agents:
+                    description: Agents to dispatch to the room.
+                    items:
+                      description: RoomAgentDispatchConfig defines an agent to dispatch
+                        to the room.
+                      properties:
+                        agentName:
+                          description: Name of the agent to dispatch.
+                          type: string
+                        metadata:
+                          description: Metadata to pass to the agent.
+                          type: string
+                      required:
+                      - agentName
+                      type: object
+                    type: array
+                  egress:
+                    description: Egress configuration for the room.
+                    properties:
+                      room:
+                        description: Room composite egress configuration.
+                        properties:
+                          audioMixing:
+                            description: Audio mixing mode.
+                            enum:
+                            - DEFAULT_MIXING
+                            type: string
+                          audioOnly:
+                            description: Record audio only.
+                            type: boolean
+                          fileOutputs:
+                            description: File outputs for this egress.
+                            items:
+                              description: FileOutput defines a file output for room
+                                composite egress.
+                              properties:
+                                egressConfigRef:
+                                  description: Reference to an EgressConfig resource
+                                    defining the storage backend.
+                                  properties:
+                                    name:
+                                      description: Name of the EgressConfig resource.
+                                      type: string
+                                  required:
+                                  - name
+                                  type: object
+                                filepath:
+                                  description: File path template (e.g. "recordings/{room_id}/recording.ogg").
+                                  type: string
+                              required:
+                              - egressConfigRef
+                              - filepath
+                              type: object
+                            type: array
+                          roomName:
+                            description: Room name.
+                            type: string
+                        type: object
+                    type: object
+                type: object
               roomPreset:
                 description: Room preset (cloud-only).
                 type: string

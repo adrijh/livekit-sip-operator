@@ -12,6 +12,18 @@ spec:
   name: my-dispatch-rule
   type: individual
   individual:
-    roomPrefix: sip-call-
+    roomPrefix: call-
   hidePhoneNumber: true
   mediaEncryption: disable
+  roomConfig:
+    agents:
+      - agentName: observatory-agent
+    egress:
+      room:
+        roomName: my-room
+        audioOnly: true
+        audioMixing: DEFAULT_MIXING
+        fileOutputs:
+          - filepath: "recordings/{room_id}/recording.ogg"
+            egressConfigRef:
+              name: minio-egress

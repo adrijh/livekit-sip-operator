@@ -22,10 +22,12 @@ import (
 
 	"github.com/livekit/protocol/livekit"
 	lksdk "github.com/livekit/server-sdk-go/v2"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -43,6 +45,7 @@ type SIPDispatchRuleReconciler struct {
 // +kubebuilder:rbac:groups=sip.livekit-sip.io,resources=sipdispatchrules,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=sip.livekit-sip.io,resources=sipdispatchrules/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=sip.livekit-sip.io,resources=sipdispatchrules/finalizers,verbs=update
+// +kubebuilder:rbac:groups=sip.livekit-sip.io,resources=egressconfigs,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 
 func (r *SIPDispatchRuleReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -84,11 +87,26 @@ func (r *SIPDispatchRuleReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	}
 	r.setCondition(rule, conditionLiveKitReady, metav1.ConditionTrue, "LiveKitSecretResolved", "LiveKit credentials read successfully")
 
-	// ── 5. Create or Update the dispatch rule in LiveKit ─────────────────
-	if rule.Status.DispatchRuleID == "" {
-		return r.reconcileCreate(ctx, rule, sipClient)
+	// ── 5. Resolve room config (EgressConfig references + secrets) ───────
+	var roomConfig *livekit.RoomConfiguration
+	if rule.Spec.RoomConfig != nil {
+		var err error
+		roomConfig, err = r.buildRoomConfig(ctx, rule)
+		if err != nil {
+			r.setCondition(rule, conditionSynced, metav1.ConditionFalse, "RoomConfigError", err.Error())
+			r.setReadyCondition(rule, false, "RoomConfigError", err.Error())
+			if statusErr := r.Status().Update(ctx, rule); statusErr != nil {
+				log.Error(statusErr, "failed to update status after room config error")
+			}
+			return ctrl.Result{RequeueAfter: requeueOnError}, nil
+		}
 	}
-	return r.reconcileUpdate(ctx, rule, sipClient)
+
+	// ── 6. Create or Update the dispatch rule in LiveKit ─────────────────
+	if rule.Status.DispatchRuleID == "" {
+		return r.reconcileCreate(ctx, rule, sipClient, roomConfig)
+	}
+	return r.reconcileUpdate(ctx, rule, sipClient, roomConfig)
 }
 
 // ─── Reconcile sub-routines ──────────────────────────────────────────────────
@@ -97,12 +115,16 @@ func (r *SIPDispatchRuleReconciler) reconcileCreate(
 	ctx context.Context,
 	rule *sipv1alpha1.SIPDispatchRule,
 	sipClient *lksdk.SIPClient,
+	roomConfig *livekit.RoomConfiguration,
 ) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 	log.Info("Creating SIP dispatch rule in LiveKit", "name", rule.Spec.Name)
 
+	ruleInfo := r.buildRuleInfo(rule)
+	ruleInfo.RoomConfig = roomConfig
+
 	req := &livekit.CreateSIPDispatchRuleRequest{
-		DispatchRule: r.buildRuleInfo(rule),
+		DispatchRule: ruleInfo,
 	}
 
 	info, err := sipClient.CreateSIPDispatchRule(ctx, req)
@@ -135,6 +157,7 @@ func (r *SIPDispatchRuleReconciler) reconcileUpdate(
 	ctx context.Context,
 	rule *sipv1alpha1.SIPDispatchRule,
 	sipClient *lksdk.SIPClient,
+	roomConfig *livekit.RoomConfiguration,
 ) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
@@ -146,6 +169,7 @@ func (r *SIPDispatchRuleReconciler) reconcileUpdate(
 
 	ruleInfo := r.buildRuleInfo(rule)
 	ruleInfo.SipDispatchRuleId = rule.Status.DispatchRuleID
+	ruleInfo.RoomConfig = roomConfig
 
 	_, err := sipClient.UpdateSIPDispatchRule(ctx, &livekit.UpdateSIPDispatchRuleRequest{
 		SipDispatchRuleId: rule.Status.DispatchRuleID,
@@ -282,6 +306,241 @@ func (r *SIPDispatchRuleReconciler) buildDispatchRule(
 	default:
 		return nil
 	}
+}
+
+// ─── Room config builders ────────────────────────────────────────────────────
+
+func (r *SIPDispatchRuleReconciler) buildRoomConfig(
+	ctx context.Context,
+	rule *sipv1alpha1.SIPDispatchRule,
+) (*livekit.RoomConfiguration, error) {
+	rc := rule.Spec.RoomConfig
+	config := &livekit.RoomConfiguration{}
+
+	// Agents
+	for _, a := range rc.Agents {
+		config.Agents = append(config.Agents, &livekit.RoomAgentDispatch{
+			AgentName: a.AgentName,
+			Metadata:  a.Metadata,
+		})
+	}
+
+	// Egress
+	if rc.Egress != nil && rc.Egress.Room != nil {
+		roomEgress, err := r.buildRoomCompositeEgress(ctx, rule.Namespace, rc.Egress.Room)
+		if err != nil {
+			return nil, fmt.Errorf("building room egress: %w", err)
+		}
+		config.Egress = &livekit.RoomEgress{
+			Room: roomEgress,
+		}
+	}
+
+	return config, nil
+}
+
+func (r *SIPDispatchRuleReconciler) buildRoomCompositeEgress(
+	ctx context.Context,
+	namespace string,
+	room *sipv1alpha1.RoomCompositeEgress,
+) (*livekit.RoomCompositeEgressRequest, error) {
+	req := &livekit.RoomCompositeEgressRequest{
+		RoomName:  room.RoomName,
+		AudioOnly: room.AudioOnly,
+	}
+
+	if room.AudioMixing == sipv1alpha1.AudioMixingDefault {
+		req.AudioMixing = livekit.AudioMixing_DEFAULT_MIXING
+	}
+
+	for _, fo := range room.FileOutputs {
+		output, err := r.buildEncodedFileOutput(ctx, namespace, &fo)
+		if err != nil {
+			return nil, err
+		}
+		req.FileOutputs = append(req.FileOutputs, output)
+	}
+
+	return req, nil
+}
+
+func (r *SIPDispatchRuleReconciler) buildEncodedFileOutput(
+	ctx context.Context,
+	namespace string,
+	fo *sipv1alpha1.FileOutput,
+) (*livekit.EncodedFileOutput, error) {
+	// Resolve the EgressConfig resource
+	egressConfig := &sipv1alpha1.EgressConfig{}
+	if err := r.Get(ctx, types.NamespacedName{
+		Name:      fo.EgressConfigRef.Name,
+		Namespace: namespace,
+	}, egressConfig); err != nil {
+		return nil, fmt.Errorf("fetching EgressConfig %q: %w", fo.EgressConfigRef.Name, err)
+	}
+
+	output := &livekit.EncodedFileOutput{
+		Filepath: fo.Filepath,
+	}
+
+	spec := egressConfig.Spec
+	switch {
+	case spec.S3 != nil:
+		s3Upload, err := r.resolveS3Config(ctx, namespace, spec.S3)
+		if err != nil {
+			return nil, err
+		}
+		output.Output = &livekit.EncodedFileOutput_S3{S3: s3Upload}
+
+	case spec.Azure != nil:
+		azureUpload, err := r.resolveAzureConfig(ctx, namespace, spec.Azure)
+		if err != nil {
+			return nil, err
+		}
+		output.Output = &livekit.EncodedFileOutput_Azure{Azure: azureUpload}
+
+	case spec.GCP != nil:
+		gcpUpload, err := r.resolveGCPConfig(ctx, namespace, spec.GCP)
+		if err != nil {
+			return nil, err
+		}
+		output.Output = &livekit.EncodedFileOutput_Gcp{Gcp: gcpUpload}
+
+	case spec.AliOSS != nil:
+		aliUpload, err := r.resolveAliOSSConfig(ctx, namespace, spec.AliOSS)
+		if err != nil {
+			return nil, err
+		}
+		output.Output = &livekit.EncodedFileOutput_AliOSS{AliOSS: aliUpload}
+
+	default:
+		return nil, fmt.Errorf("EgressConfig %q has no storage backend configured", egressConfig.Name)
+	}
+
+	return output, nil
+}
+
+// resolveSecretKey reads a single key from a Secret, using the provided default if no override is set.
+func (r *SIPDispatchRuleReconciler) resolveSecretKey(
+	ctx context.Context,
+	namespace string,
+	ref sipv1alpha1.SecretKeySelector,
+	defaultKey string,
+) (string, error) {
+	secret := &corev1.Secret{}
+	if err := r.Get(ctx, types.NamespacedName{
+		Name:      ref.Name,
+		Namespace: namespace,
+	}, secret); err != nil {
+		return "", fmt.Errorf("fetching secret %q: %w", ref.Name, err)
+	}
+
+	key := defaultKey
+	if ref.Key != "" {
+		key = ref.Key
+	}
+
+	val, ok := secret.Data[key]
+	if !ok {
+		return "", fmt.Errorf("key %q not found in secret %q", key, ref.Name)
+	}
+	return string(val), nil
+}
+
+func (r *SIPDispatchRuleReconciler) resolveS3Config(
+	ctx context.Context,
+	namespace string,
+	cfg *sipv1alpha1.S3Config,
+) (*livekit.S3Upload, error) {
+	accessKey, err := r.resolveSecretKey(ctx, namespace, cfg.AccessKeyRef, "access_key")
+	if err != nil {
+		return nil, fmt.Errorf("resolving S3 access key: %w", err)
+	}
+
+	secretKey, err := r.resolveSecretKey(ctx, namespace, cfg.SecretKeyRef, "secret")
+	if err != nil {
+		return nil, fmt.Errorf("resolving S3 secret: %w", err)
+	}
+
+	upload := &livekit.S3Upload{
+		AccessKey:      accessKey,
+		Secret:         secretKey,
+		Region:         cfg.Region,
+		Endpoint:       cfg.Endpoint,
+		Bucket:         cfg.Bucket,
+		ForcePathStyle: cfg.ForcePathStyle,
+	}
+
+	if cfg.SessionTokenRef != nil {
+		token, err := r.resolveSecretKey(ctx, namespace, *cfg.SessionTokenRef, "session_token")
+		if err != nil {
+			return nil, fmt.Errorf("resolving S3 session token: %w", err)
+		}
+		upload.SessionToken = token
+	}
+
+	return upload, nil
+}
+
+func (r *SIPDispatchRuleReconciler) resolveAzureConfig(
+	ctx context.Context,
+	namespace string,
+	cfg *sipv1alpha1.AzureConfig,
+) (*livekit.AzureBlobUpload, error) {
+	accountName, err := r.resolveSecretKey(ctx, namespace, cfg.AccountNameRef, "account_name")
+	if err != nil {
+		return nil, fmt.Errorf("resolving Azure account name: %w", err)
+	}
+
+	accountKey, err := r.resolveSecretKey(ctx, namespace, cfg.AccountKeyRef, "account_key")
+	if err != nil {
+		return nil, fmt.Errorf("resolving Azure account key: %w", err)
+	}
+
+	return &livekit.AzureBlobUpload{
+		AccountName:   accountName,
+		AccountKey:    accountKey,
+		ContainerName: cfg.ContainerName,
+	}, nil
+}
+
+func (r *SIPDispatchRuleReconciler) resolveGCPConfig(
+	ctx context.Context,
+	namespace string,
+	cfg *sipv1alpha1.GCPConfig,
+) (*livekit.GCPUpload, error) {
+	credentials, err := r.resolveSecretKey(ctx, namespace, cfg.CredentialsRef, "credentials")
+	if err != nil {
+		return nil, fmt.Errorf("resolving GCP credentials: %w", err)
+	}
+
+	return &livekit.GCPUpload{
+		Credentials: credentials,
+		Bucket:      cfg.Bucket,
+	}, nil
+}
+
+func (r *SIPDispatchRuleReconciler) resolveAliOSSConfig(
+	ctx context.Context,
+	namespace string,
+	cfg *sipv1alpha1.AliOSSConfig,
+) (*livekit.AliOSSUpload, error) {
+	accessKey, err := r.resolveSecretKey(ctx, namespace, cfg.AccessKeyRef, "access_key")
+	if err != nil {
+		return nil, fmt.Errorf("resolving AliOSS access key: %w", err)
+	}
+
+	secretKey, err := r.resolveSecretKey(ctx, namespace, cfg.SecretKeyRef, "secret")
+	if err != nil {
+		return nil, fmt.Errorf("resolving AliOSS secret: %w", err)
+	}
+
+	return &livekit.AliOSSUpload{
+		AccessKey: accessKey,
+		Secret:    secretKey,
+		Region:    cfg.Region,
+		Endpoint:  cfg.Endpoint,
+		Bucket:    cfg.Bucket,
+	}, nil
 }
 
 // ─── Condition helpers ───────────────────────────────────────────────────────

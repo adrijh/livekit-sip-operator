@@ -4,6 +4,33 @@ metadata:
   labels:
     app.kubernetes.io/name: livekit-sip-operator
     app.kubernetes.io/managed-by: kustomize
-  name: egressconfig-sample
+  name: minio-egress
 spec:
-  # TODO(user): Add fields here
+  s3:
+    region: us-east-1
+    endpoint: "http://minio.minio.svc.cluster.local:9000"
+    bucket: sessions
+    forcePathStyle: true
+    accessKeyRef:
+      name: minio-credentials
+      # key defaults to "access_key"; override with e.g. key: "username"
+    secretKeyRef:
+      name: minio-credentials
+      # key defaults to "secret"; override with e.g. key: "password"
+---
+apiVersion: sip.livekit-sip.io/v1alpha1
+kind: EgressConfig
+metadata:
+  labels:
+    app.kubernetes.io/name: livekit-sip-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: azure-egress
+spec:
+  azure:
+    containerName: sessions
+    accountNameRef:
+      name: azure-storage-credentials
+      # key defaults to "account_name"
+    accountKeyRef:
+      name: azure-storage-credentials
+      # key defaults to "account_key"
