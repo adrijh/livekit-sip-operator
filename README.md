@@ -1,6 +1,16 @@
 # livekit-sip-operator
 
-A Kubernetes operator that manages [LiveKit](https://livekit.io/) SIP resources declaratively. Define SIP inbound trunks, outbound trunks, and dispatch rules as Kubernetes custom resources, and the operator keeps them in sync with the LiveKit server.
+A Kubernetes operator that manages [LiveKit](https://livekit.io/) SIP resources declaratively. Define SIP inbound trunks, outbound trunks, dispatch rules, and egress configurations as Kubernetes custom resources, and the operator keeps them in sync with the LiveKit server.
+
+## Overview
+
+Instead of managing SIP resources through the LiveKit API or CLI, this operator lets you declare them as standard Kubernetes manifests. The operator watches for changes and reconciles them against your LiveKit server automatically.
+
+**Key design:** The operator itself requires no configuration. Each custom resource points to a LiveKit server via `spec.livekitRef`, meaning:
+
+- Different resources can target different LiveKit servers
+- Credentials are managed as standard Kubernetes Secrets
+- No cluster-wide LiveKit configuration is needed
 
 ## Custom Resources
 
@@ -9,43 +19,60 @@ A Kubernetes operator that manages [LiveKit](https://livekit.io/) SIP resources 
 | `SIPInboundTrunk` | Phone numbers and routing for incoming SIP calls |
 | `SIPOutboundTrunk` | SIP provider configuration for outgoing calls |
 | `SIPDispatchRule` | Rules that route incoming calls to LiveKit rooms |
+| `EgressConfig` | Storage backend configuration (S3, Azure) referenced by dispatch rules for call recording |
 
-Each CR points to a LiveKit server via `spec.livekitRef`, which includes the in-cluster Service name and a Secret with API credentials. This means:
+## Installation
 
-- The operator deploys with zero configuration
-- Different resources can target different LiveKit servers
-- Credentials are managed as standard Kubernetes Secrets
+### Helm (recommended)
 
-## Getting Started
-
-### Prerequisites
-
-- go version v1.24.0+
-- docker version 17.03+
-- kubectl version v1.11.3+
-- Access to a Kubernetes v1.11.3+ cluster
-- A running LiveKit server with SIP enabled
-
-### 1. Deploy the operator
-
-```sh
-make docker-build docker-push IMG=<your-registry>/livekit-sip-operator:tag
-make deploy IMG=<your-registry>/livekit-sip-operator:tag
+```bash
+helm install livekit-sip-operator \
+  oci://registry-1.docker.io/adrianjh/livekit-sip-operator \
+  --version 0.0.1 \
+  --namespace livekit-sip-operator-system --create-namespace
 ```
 
-### 2. Create a LiveKit credentials secret
+#### Helm Values
 
-Create a Secret in the namespace where your SIP resources will live. Only API credentials are needed — the server URL is derived from the Service name.
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `image.repository` | Container image repository | `docker.io/adrianjh/livekit-sip-operator` |
+| `image.tag` | Image tag (defaults to chart `appVersion`) | `""` |
+| `image.pullPolicy` | Image pull policy | `IfNotPresent` |
+| `replicaCount` | Number of controller replicas | `1` |
+| `resources.limits.cpu` | CPU limit | `500m` |
+| `resources.limits.memory` | Memory limit | `128Mi` |
+| `resources.requests.cpu` | CPU request | `10m` |
+| `resources.requests.memory` | Memory request | `64Mi` |
+| `leaderElection.enabled` | Enable leader election | `true` |
+| `serviceAccount.name` | Service account name (auto-generated if empty) | `""` |
+| `nodeSelector` | Node selector | `{}` |
+| `tolerations` | Tolerations | `[]` |
+| `affinity` | Affinity rules | `{}` |
 
-```sh
+### Raw Manifests
+
+```bash
+kubectl apply -f https://raw.githubusercontent.com/adrijh/livekit-sip-operator/main/dist/install.yaml
+```
+
+This creates the `livekit-sip-operator-system` namespace with the CRDs, RBAC, and controller deployment.
+
+## Usage
+
+### 1. Create a LiveKit credentials Secret
+
+Create a Secret in the namespace where your SIP resources will live:
+
+```bash
 kubectl create secret generic livekit-credentials \
   --from-literal=LIVEKIT_API_KEY="YOUR_API_KEY" \
   --from-literal=LIVEKIT_API_SECRET="YOUR_API_SECRET"
 ```
 
-### 3. Create SIP resources
+### 2. Create SIP resources
 
-Each resource references the LiveKit Service and credentials secret via `spec.livekitRef`:
+Each resource references the LiveKit Service and credentials Secret via `spec.livekitRef`:
 
 ```yaml
 apiVersion: sip.livekit-sip.io/v1alpha1
@@ -54,9 +81,9 @@ metadata:
   name: my-trunk
 spec:
   livekitRef:
-    service: livekit-server    # name of the LiveKit K8s Service
+    service: livekit-server       # name of the LiveKit K8s Service
     secretName: livekit-credentials
-    # port: 7880               # optional, defaults to 7880
+    # port: 7880                  # optional, defaults to 7880
   name: my-inbound-trunk
   numbers:
     - "+15551234567"
@@ -96,54 +123,109 @@ spec:
   hidePhoneNumber: true
 ```
 
-Or apply the included samples:
+### 3. Call recording with EgressConfig
 
-```sh
-kubectl create secret generic livekit-credentials \
-  --from-literal=LIVEKIT_API_KEY="YOUR_API_KEY" \
-  --from-literal=LIVEKIT_API_SECRET="YOUR_API_SECRET"
+Dispatch rules can reference an `EgressConfig` to automatically record calls. The `EgressConfig` defines the storage backend, and credentials are pulled from Kubernetes Secrets:
 
-kubectl apply -f config/samples/
+```yaml
+apiVersion: sip.livekit-sip.io/v1alpha1
+kind: EgressConfig
+metadata:
+  name: minio-egress
+spec:
+  s3:
+    region: us-east-1
+    endpoint: "http://minio.minio.svc.cluster.local:9000"
+    bucket: sessions
+    forcePathStyle: true
+    accessKeyRef:
+      name: minio-credentials
+    secretKeyRef:
+      name: minio-credentials
+```
+
+Then reference it from a dispatch rule:
+
+```yaml
+apiVersion: sip.livekit-sip.io/v1alpha1
+kind: SIPDispatchRule
+metadata:
+  name: recorded-calls
+spec:
+  livekitRef:
+    service: livekit-server
+    secretName: livekit-credentials
+  name: recorded-dispatch
+  type: individual
+  individual:
+    roomPrefix: call-
+  roomConfig:
+    egress:
+      room:
+        audioOnly: true
+        fileOutputs:
+          - filepath: "recordings/{room_id}/recording.ogg"
+            egressConfigRef:
+              name: minio-egress
 ```
 
 ### 4. Check status
 
-```sh
+```bash
 kubectl get sipinboundtrunks
 kubectl get sipoutboundtrunks
 kubectl get sipdispatchrules
+kubectl get egressconfigs
 ```
 
-## Local Development
+Each resource shows its LiveKit ID and readiness status:
 
-Run the controller locally against your cluster (no image build needed):
-
-```sh
-make install   # install CRDs
-make run       # run controller locally
 ```
-
-Then create a credentials secret and apply your CRs as above.
+NAME       TRUNK ID              READY   AGE
+my-trunk   ST_xxxxxxxxxxxx       True    5m
+```
 
 ## Uninstall
 
-```sh
-kubectl delete -k config/samples/   # delete sample CRs
-make undeploy                        # remove controller + RBAC + CRDs
+### Helm
+
+```bash
+helm uninstall livekit-sip-operator -n livekit-sip-operator-system
+kubectl delete namespace livekit-sip-operator-system
 ```
 
-## License
+### Raw Manifests
 
-Copyright 2026.
+```bash
+kubectl delete -f https://raw.githubusercontent.com/adrijh/livekit-sip-operator/main/dist/install.yaml
+```
 
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
+## Development
 
-    http://www.apache.org/licenses/LICENSE-2.0
+### Prerequisites
 
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
+- Go 1.26+
+- Docker
+- kubectl
+- Access to a Kubernetes cluster
+
+### Run locally
+
+```bash
+make install   # install CRDs into your cluster
+make run       # run the controller on your machine
+```
+
+### Build and deploy to a local cluster
+
+```bash
+make docker-build                          # builds controller:latest for local platform
+make deploy IMG=controller:latest          # deploys to current kubectl context
+```
+
+### Run tests
+
+```bash
+make test       # unit tests
+make test-e2e   # e2e tests (uses Kind)
+```
