@@ -1,0 +1,17 @@
+apiVersion: v2
+name: livekit-sip-operator
+description: A Kubernetes operator for managing LiveKit SIP trunks and dispatch rules
+type: application
+version: 0.0.1
+appVersion: "0.0.1"
+keywords:
+  - livekit
+  - sip
+  - operator
+  - voip
+  - telephony
+home: https://github.com/adrijh/livekit-sip-operator
+sources:
+  - https://github.com/adrijh/livekit-sip-operator
+maintainers:
+  - name: Adrian Jimenez Hernandez

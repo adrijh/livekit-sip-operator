@@ -1,0 +1,25 @@
+image:
+  repository: docker.io/adrianjh/livekit-sip-operator
+  tag: ""  # Defaults to appVersion
+  pullPolicy: IfNotPresent
+
+replicaCount: 1
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 128Mi
+  requests:
+    cpu: 10m
+    memory: 64Mi
+
+leaderElection:
+  enabled: true
+
+serviceAccount:
+  # Name of the service account to use. If not set, a name is generated.
+  name: ""
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

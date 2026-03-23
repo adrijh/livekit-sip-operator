@@ -28,8 +28,8 @@ BUNDLE_METADATA_OPTS ?= $(BUNDLE_CHANNELS) $(BUNDLE_DEFAULT_CHANNEL)
 # This variable is used to construct full image tags for bundle and catalog images.
 #
 # For example, running 'make bundle-build bundle-push catalog-build catalog-push' will build and push both
-# livekit-sip.io/livekit-sip-operator-bundle:$VERSION and livekit-sip.io/livekit-sip-operator-catalog:$VERSION.
-IMAGE_TAG_BASE ?= livekit-sip.io/livekit-sip-operator
+# docker.io/adrianjh/livekit-sip-operator-bundle:$VERSION and docker.io/adrianjh/livekit-sip-operator-catalog:$VERSION.
+IMAGE_TAG_BASE ?= docker.io/adrianjh/livekit-sip-operator
 
 # BUNDLE_IMG defines the image:tag used for the bundle.
 # You can use it as an arg. (E.g make bundle-build BUNDLE_IMG=<some-registry>/<project-name-bundle>:<tag>)
@@ -50,6 +50,8 @@ endif
 # This is useful for CI or a project to utilize a specific version of the operator-sdk toolkit.
 OPERATOR_SDK_VERSION ?= v1.42.2
 # Image URL to use all building/pushing image targets
+# For local development: make docker-build (uses controller:latest with imagePullPolicy: Never)
+# For release:           make docker-build docker-push IMG=$(IMAGE_TAG_BASE):v$(VERSION)
 IMG ?= controller:latest
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
@@ -180,7 +182,7 @@ docker-push: ## Push docker image with the manager.
 # - have enabled BuildKit. More info: https://docs.docker.com/develop/develop-images/build_enhancements/
 # - be able to push the image to your registry (i.e. if you do not set a valid value via IMG=<myregistry/image:<tag>> then the export will fail)
 # To adequately provide solutions that are compatible with multiple platforms, you should consider using this option.
-PLATFORMS ?= linux/arm64,linux/amd64,linux/s390x,linux/ppc64le
+PLATFORMS ?= linux/amd64,linux/arm64
 .PHONY: docker-buildx
 docker-buildx: ## Build and push docker image for the manager for cross-platform support
 	# copy existing Dockerfile and insert --platform=${BUILDPLATFORM} into Dockerfile.cross, and preserve the original Dockerfile
@@ -196,6 +198,20 @@ build-installer: manifests generate kustomize ## Generate a consolidated YAML wi
 	mkdir -p dist
 	cd config/manager && $(KUSTOMIZE) edit set image controller=${IMG}
 	$(KUSTOMIZE) build config/default > dist/install.yaml
+
+.PHONY: helm-push
+helm-push: ## Package and push Helm chart to Docker Hub OCI registry.
+	helm package charts/livekit-sip-operator
+	helm push livekit-sip-operator-$(VERSION).tgz oci://registry-1.docker.io/adrianjh
+	rm -f livekit-sip-operator-$(VERSION).tgz
+
+.PHONY: release-build
+release-build: ## Build and push multi-arch release image to Docker Hub, then regenerate install manifest.
+	$(MAKE) docker-buildx IMG=$(IMAGE_TAG_BASE):v$(VERSION)
+	$(MAKE) build-installer IMG=$(IMAGE_TAG_BASE):v$(VERSION)
+
+.PHONY: release
+release: release-build helm-push ## Full release: multi-arch image + install manifest + Helm chart push.
 
 ##@ Deployment
 
@@ -242,7 +258,7 @@ CONTROLLER_TOOLS_VERSION ?= v0.18.0
 ENVTEST_VERSION ?= $(shell go list -m -f "{{ .Version }}" sigs.k8s.io/controller-runtime | awk -F'[v.]' '{printf "release-%d.%d", $$2, $$3}')
 #ENVTEST_K8S_VERSION is the version of Kubernetes to use for setting up ENVTEST binaries (i.e. 1.31)
 ENVTEST_K8S_VERSION ?= $(shell go list -m -f "{{ .Version }}" k8s.io/api | awk -F'[v.]' '{printf "1.%d", $$3}')
-GOLANGCI_LINT_VERSION ?= v2.1.0
+GOLANGCI_LINT_VERSION ?= v2.11.4
 
 .PHONY: kustomize
 kustomize: $(KUSTOMIZE) ## Download kustomize locally if necessary.
