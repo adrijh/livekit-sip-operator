@@ -6,6 +6,8 @@ resources:
 - bases/sip.livekit-sip.io_sipoutboundtrunks.yaml
 - bases/sip.livekit-sip.io_sipdispatchrules.yaml
 - bases/sip.livekit-sip.io_egressconfigs.yaml
+- bases/sip.livekit-sip.io_sipnumbers.yaml
+- bases/sip.livekit-sip.io_agentroutes.yaml
 # +kubebuilder:scaffold:crdkustomizeresource
 
 patches:

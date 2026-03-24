@@ -1,0 +1,12 @@
+apiVersion: sip.livekit-sip.io/v1alpha1
+kind: SIPNumber
+metadata:
+  labels:
+    app.kubernetes.io/name: livekit-sip-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: support-line
+spec:
+  livekitRef:
+    service: livekit-server
+    secretName: livekit-credentials
+  number: "+15551234567"

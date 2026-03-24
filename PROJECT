@@ -46,4 +46,22 @@ resources:
   kind: EgressConfig
   path: github.com/adrijh/livekit-sip-operator/api/v1alpha1
   version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: livekit-sip.io
+  group: sip
+  kind: SIPNumber
+  path: github.com/adrijh/livekit-sip-operator/api/v1alpha1
+  version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: livekit-sip.io
+  group: sip
+  kind: AgentRoute
+  path: github.com/adrijh/livekit-sip-operator/api/v1alpha1
+  version: v1alpha1
 version: "3"

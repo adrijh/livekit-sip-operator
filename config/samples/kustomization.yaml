@@ -4,4 +4,6 @@ resources:
 - sip_v1alpha1_sipoutboundtrunk.yaml
 - sip_v1alpha1_sipdispatchrule.yaml
 - sip_v1alpha1_egressconfig.yaml
+- sip_v1alpha1_sipnumber.yaml
+- sip_v1alpha1_agentroute.yaml
 # +kubebuilder:scaffold:manifestskustomizesamples

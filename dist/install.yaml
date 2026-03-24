@@ -12,6 +12,280 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.18.0
+  name: agentroutes.sip.livekit-sip.io
+spec:
+  group: sip.livekit-sip.io
+  names:
+    kind: AgentRoute
+    listKind: AgentRouteList
+    plural: agentroutes
+    singular: agentroute
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.agentName
+      name: Agent
+      type: string
+    - jsonPath: .status.dispatchRuleID
+      name: Rule ID
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Ready")].status
+      name: Ready
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          AgentRoute is the Schema for the agentroutes API.
+          It binds one or more SIPNumbers to a LiveKit agent by managing
+          a SIP dispatch rule with the correct trunk IDs.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              AgentRouteSpec defines the desired state of AgentRoute.
+              An AgentRoute binds one or more SIPNumbers to an agent by creating
+              a SIP dispatch rule whose trunk_ids list is kept in sync with the
+              referenced SIPNumbers' trunk IDs.
+            properties:
+              agentMetadata:
+                description: Metadata to pass to the dispatched agent.
+                type: string
+              agentName:
+                description: Name of the agent to dispatch calls to.
+                type: string
+              hidePhoneNumber:
+                description: Hide the caller's phone number from participants.
+                type: boolean
+              krispEnabled:
+                description: Enable Krisp noise cancellation.
+                type: boolean
+              livekitRef:
+                description: Reference to the LiveKit server and API credentials.
+                properties:
+                  port:
+                    default: 7880
+                    description: Port of the LiveKit HTTP API on the Service.
+                    format: int32
+                    type: integer
+                  secretName:
+                    description: 'Name of the Secret containing LiveKit API credentials
+                      (keys: LIVEKIT_API_KEY, LIVEKIT_API_SECRET).'
+                    type: string
+                  service:
+                    description: |-
+                      Name of the LiveKit Kubernetes Service (in the same namespace).
+                      The operator connects via http://<service>:<port>.
+                    type: string
+                required:
+                - secretName
+                - service
+                type: object
+              mediaEncryption:
+                description: Media encryption mode.
+                enum:
+                - disable
+                - allow
+                - require
+                type: string
+              numberRefs:
+                description: |-
+                  References to SIPNumber resources whose trunk IDs should be
+                  included in the dispatch rule.
+                items:
+                  description: SIPNumberReference references a SIPNumber resource
+                    by name (same namespace).
+                  properties:
+                    name:
+                      description: Name of the SIPNumber resource.
+                      type: string
+                  required:
+                  - name
+                  type: object
+                minItems: 1
+                type: array
+              roomConfig:
+                description: Room configuration applied when the dispatch rule creates
+                  or joins a room.
+                properties:
+                  agents:
+                    description: Agents to dispatch to the room.
+                    items:
+                      description: RoomAgentDispatchConfig defines an agent to dispatch
+                        to the room.
+                      properties:
+                        agentName:
+                          description: Name of the agent to dispatch.
+                          type: string
+                        metadata:
+                          description: Metadata to pass to the agent.
+                          type: string
+                      required:
+                      - agentName
+                      type: object
+                    type: array
+                  egress:
+                    description: Egress configuration for the room.
+                    properties:
+                      room:
+                        description: Room composite egress configuration.
+                        properties:
+                          audioMixing:
+                            description: Audio mixing mode.
+                            enum:
+                            - DEFAULT_MIXING
+                            type: string
+                          audioOnly:
+                            description: Record audio only.
+                            type: boolean
+                          fileOutputs:
+                            description: File outputs for this egress.
+                            items:
+                              description: FileOutput defines a file output for room
+                                composite egress.
+                              properties:
+                                egressConfigRef:
+                                  description: Reference to an EgressConfig resource
+                                    defining the storage backend.
+                                  properties:
+                                    name:
+                                      description: Name of the EgressConfig resource.
+                                      type: string
+                                  required:
+                                  - name
+                                  type: object
+                                filepath:
+                                  description: File path template (e.g. "recordings/{room_id}/recording.ogg").
+                                  type: string
+                              required:
+                              - egressConfigRef
+                              - filepath
+                              type: object
+                            type: array
+                          roomName:
+                            description: Room name.
+                            type: string
+                        type: object
+                    type: object
+                type: object
+            required:
+            - agentName
+            - livekitRef
+            - numberRefs
+            type: object
+          status:
+            description: AgentRouteStatus defines the observed state of AgentRoute.
+            properties:
+              conditions:
+                description: Standard conditions for the resource.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              dispatchRuleID:
+                description: The LiveKit dispatch rule ID returned after creation.
+                type: string
+              lastSyncedAt:
+                description: Last time the resource was successfully reconciled.
+                format: date-time
+                type: string
+              message:
+                description: Human-readable message about the current state.
+                type: string
+              observedGeneration:
+                description: The generation last observed by the controller.
+                format: int64
+                type: integer
+              trunkIDs:
+                description: Trunk IDs currently synced into the dispatch rule.
+                items:
+                  type: string
+                type: array
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.18.0
   name: egressconfigs.sip.livekit-sip.io
 spec:
   group: sip.livekit-sip.io
@@ -796,6 +1070,209 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.18.0
+  name: sipnumbers.sip.livekit-sip.io
+spec:
+  group: sip.livekit-sip.io
+  names:
+    kind: SIPNumber
+    listKind: SIPNumberList
+    plural: sipnumbers
+    singular: sipnumber
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.number
+      name: Number
+      type: string
+    - jsonPath: .status.trunkID
+      name: Trunk ID
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Ready")].status
+      name: Ready
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          SIPNumber is the Schema for the sipnumbers API.
+          It represents a single phone number (DID) and manages the lifecycle
+          of the underlying SIP inbound trunk in LiveKit.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              SIPNumberSpec defines the desired state of SIPNumber.
+              A SIPNumber represents a single phone number (DID) and manages
+              the lifecycle of the SIP inbound trunk backing it.
+            properties:
+              allowedAddresses:
+                description: IP addresses or CIDR blocks allowed to use the trunk.
+                items:
+                  type: string
+                type: array
+              authSecretRef:
+                description: 'Reference to a Secret containing SIP auth credentials
+                  (keys: username, password).'
+                properties:
+                  name:
+                    description: Name of the Secret in the same namespace.
+                    type: string
+                required:
+                - name
+                type: object
+              krispEnabled:
+                description: Enable Krisp noise cancellation for the caller.
+                type: boolean
+              livekitRef:
+                description: Reference to the LiveKit server and API credentials.
+                properties:
+                  port:
+                    default: 7880
+                    description: Port of the LiveKit HTTP API on the Service.
+                    format: int32
+                    type: integer
+                  secretName:
+                    description: 'Name of the Secret containing LiveKit API credentials
+                      (keys: LIVEKIT_API_KEY, LIVEKIT_API_SECRET).'
+                    type: string
+                  service:
+                    description: |-
+                      Name of the LiveKit Kubernetes Service (in the same namespace).
+                      The operator connects via http://<service>:<port>.
+                    type: string
+                required:
+                - secretName
+                - service
+                type: object
+              maxCallDuration:
+                description: Maximum call duration.
+                type: string
+              mediaEncryption:
+                description: Media encryption mode.
+                enum:
+                - disable
+                - allow
+                - require
+                type: string
+              number:
+                description: The phone number (DID) in E.164 format (e.g. "+15551234567").
+                pattern: ^\+[1-9]\d{1,14}$
+                type: string
+              ringingTimeout:
+                description: Maximum time for the call to ring before timing out.
+                type: string
+            required:
+            - livekitRef
+            - number
+            type: object
+          status:
+            description: SIPNumberStatus defines the observed state of SIPNumber.
+            properties:
+              conditions:
+                description: Standard conditions for the resource.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              lastSyncedAt:
+                description: Last time the resource was successfully reconciled.
+                format: date-time
+                type: string
+              message:
+                description: Human-readable message about the current state.
+                type: string
+              observedGeneration:
+                description: The generation last observed by the controller.
+                format: int64
+                type: integer
+              trunkID:
+                description: The LiveKit trunk ID returned after creation.
+                type: string
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.18.0
   name: sipoutboundtrunks.sip.livekit-sip.io
 spec:
   group: sip.livekit-sip.io
@@ -1080,6 +1557,77 @@ metadata:
   labels:
     app.kubernetes.io/managed-by: kustomize
     app.kubernetes.io/name: livekit-sip-operator
+  name: livekit-sip-operator-agentroute-admin-role
+rules:
+- apiGroups:
+  - sip.livekit-sip.io
+  resources:
+  - agentroutes
+  verbs:
+  - '*'
+- apiGroups:
+  - sip.livekit-sip.io
+  resources:
+  - agentroutes/status
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: livekit-sip-operator
+  name: livekit-sip-operator-agentroute-editor-role
+rules:
+- apiGroups:
+  - sip.livekit-sip.io
+  resources:
+  - agentroutes
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - sip.livekit-sip.io
+  resources:
+  - agentroutes/status
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: livekit-sip-operator
+  name: livekit-sip-operator-agentroute-viewer-role
+rules:
+- apiGroups:
+  - sip.livekit-sip.io
+  resources:
+  - agentroutes
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - sip.livekit-sip.io
+  resources:
+  - agentroutes/status
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: livekit-sip-operator
   name: livekit-sip-operator-egressconfig-admin-role
 rules:
 - apiGroups:
@@ -1168,16 +1716,10 @@ rules:
 - apiGroups:
   - sip.livekit-sip.io
   resources:
-  - egressconfigs
-  verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
-  - sip.livekit-sip.io
-  resources:
+  - agentroutes
   - sipdispatchrules
   - sipinboundtrunks
+  - sipnumbers
   - sipoutboundtrunks
   verbs:
   - create
@@ -1190,21 +1732,33 @@ rules:
 - apiGroups:
   - sip.livekit-sip.io
   resources:
+  - agentroutes/finalizers
   - sipdispatchrules/finalizers
   - sipinboundtrunks/finalizers
+  - sipnumbers/finalizers
   - sipoutboundtrunks/finalizers
   verbs:
   - update
 - apiGroups:
   - sip.livekit-sip.io
   resources:
+  - agentroutes/status
   - sipdispatchrules/status
   - sipinboundtrunks/status
+  - sipnumbers/status
   - sipoutboundtrunks/status
   verbs:
   - get
   - patch
   - update
+- apiGroups:
+  - sip.livekit-sip.io
+  resources:
+  - egressconfigs
+  verbs:
+  - get
+  - list
+  - watch
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -1382,6 +1936,77 @@ metadata:
   labels:
     app.kubernetes.io/managed-by: kustomize
     app.kubernetes.io/name: livekit-sip-operator
+  name: livekit-sip-operator-sipnumber-admin-role
+rules:
+- apiGroups:
+  - sip.livekit-sip.io
+  resources:
+  - sipnumbers
+  verbs:
+  - '*'
+- apiGroups:
+  - sip.livekit-sip.io
+  resources:
+  - sipnumbers/status
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: livekit-sip-operator
+  name: livekit-sip-operator-sipnumber-editor-role
+rules:
+- apiGroups:
+  - sip.livekit-sip.io
+  resources:
+  - sipnumbers
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - sip.livekit-sip.io
+  resources:
+  - sipnumbers/status
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: livekit-sip-operator
+  name: livekit-sip-operator-sipnumber-viewer-role
+rules:
+- apiGroups:
+  - sip.livekit-sip.io
+  resources:
+  - sipnumbers
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - sip.livekit-sip.io
+  resources:
+  - sipnumbers/status
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: livekit-sip-operator
   name: livekit-sip-operator-sipoutboundtrunk-admin-role
 rules:
 - apiGroups:
@@ -1542,7 +2167,7 @@ spec:
         - --health-probe-bind-address=:8081
         command:
         - /manager
-        image: docker.io/adrianjh/livekit-sip-operator:v0.0.1
+        image: docker.io/adrianjh/livekit-sip-operator:v0.0.2-dev3
         imagePullPolicy: IfNotPresent
         livenessProbe:
           httpGet:

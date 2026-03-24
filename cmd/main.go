@@ -223,6 +223,20 @@ func main() {
 		setupLog.Error(err, "unable to create controller", "controller", "SIPDispatchRule")
 		os.Exit(1)
 	}
+	if err := (&controller.SIPNumberReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "SIPNumber")
+		os.Exit(1)
+	}
+	if err := (&controller.AgentRouteReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "AgentRoute")
+		os.Exit(1)
+	}
 	// +kubebuilder:scaffold:builder
 
 	if metricsCertWatcher != nil {

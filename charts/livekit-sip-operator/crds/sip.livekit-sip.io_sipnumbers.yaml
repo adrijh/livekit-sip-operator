@@ -1,0 +1,203 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.18.0
+  name: sipnumbers.sip.livekit-sip.io
+spec:
+  group: sip.livekit-sip.io
+  names:
+    kind: SIPNumber
+    listKind: SIPNumberList
+    plural: sipnumbers
+    singular: sipnumber
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.number
+      name: Number
+      type: string
+    - jsonPath: .status.trunkID
+      name: Trunk ID
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Ready")].status
+      name: Ready
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          SIPNumber is the Schema for the sipnumbers API.
+          It represents a single phone number (DID) and manages the lifecycle
+          of the underlying SIP inbound trunk in LiveKit.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              SIPNumberSpec defines the desired state of SIPNumber.
+              A SIPNumber represents a single phone number (DID) and manages
+              the lifecycle of the SIP inbound trunk backing it.
+            properties:
+              allowedAddresses:
+                description: IP addresses or CIDR blocks allowed to use the trunk.
+                items:
+                  type: string
+                type: array
+              authSecretRef:
+                description: 'Reference to a Secret containing SIP auth credentials
+                  (keys: username, password).'
+                properties:
+                  name:
+                    description: Name of the Secret in the same namespace.
+                    type: string
+                required:
+                - name
+                type: object
+              krispEnabled:
+                description: Enable Krisp noise cancellation for the caller.
+                type: boolean
+              livekitRef:
+                description: Reference to the LiveKit server and API credentials.
+                properties:
+                  port:
+                    default: 7880
+                    description: Port of the LiveKit HTTP API on the Service.
+                    format: int32
+                    type: integer
+                  secretName:
+                    description: 'Name of the Secret containing LiveKit API credentials
+                      (keys: LIVEKIT_API_KEY, LIVEKIT_API_SECRET).'
+                    type: string
+                  service:
+                    description: |-
+                      Name of the LiveKit Kubernetes Service (in the same namespace).
+                      The operator connects via http://<service>:<port>.
+                    type: string
+                required:
+                - secretName
+                - service
+                type: object
+              maxCallDuration:
+                description: Maximum call duration.
+                type: string
+              mediaEncryption:
+                description: Media encryption mode.
+                enum:
+                - disable
+                - allow
+                - require
+                type: string
+              number:
+                description: The phone number (DID) in E.164 format (e.g. "+15551234567").
+                pattern: ^\+[1-9]\d{1,14}$
+                type: string
+              ringingTimeout:
+                description: Maximum time for the call to ring before timing out.
+                type: string
+            required:
+            - livekitRef
+            - number
+            type: object
+          status:
+            description: SIPNumberStatus defines the observed state of SIPNumber.
+            properties:
+              conditions:
+                description: Standard conditions for the resource.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              lastSyncedAt:
+                description: Last time the resource was successfully reconciled.
+                format: date-time
+                type: string
+              message:
+                description: Human-readable message about the current state.
+                type: string
+              observedGeneration:
+                description: The generation last observed by the controller.
+                format: int64
+                type: integer
+              trunkID:
+                description: The LiveKit trunk ID returned after creation.
+                type: string
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

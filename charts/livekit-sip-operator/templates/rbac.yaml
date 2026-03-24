@@ -32,8 +32,10 @@ rules:
 - apiGroups:
   - sip.livekit-sip.io
   resources:
+  - agentroutes
   - sipdispatchrules
   - sipinboundtrunks
+  - sipnumbers
   - sipoutboundtrunks
   verbs:
   - create
@@ -46,16 +48,20 @@ rules:
 - apiGroups:
   - sip.livekit-sip.io
   resources:
+  - agentroutes/finalizers
   - sipdispatchrules/finalizers
   - sipinboundtrunks/finalizers
+  - sipnumbers/finalizers
   - sipoutboundtrunks/finalizers
   verbs:
   - update
 - apiGroups:
   - sip.livekit-sip.io
   resources:
+  - agentroutes/status
   - sipdispatchrules/status
   - sipinboundtrunks/status
+  - sipnumbers/status
   - sipoutboundtrunks/status
   verbs:
   - get

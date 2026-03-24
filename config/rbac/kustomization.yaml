@@ -22,6 +22,12 @@ resources:
 # default, aiding admins in cluster management. Those roles are
 # not used by the livekit-sip-operator itself. You can comment the following lines
 # if you do not want those helpers be installed with your Project.
+- agentroute_admin_role.yaml
+- agentroute_editor_role.yaml
+- agentroute_viewer_role.yaml
+- sipnumber_admin_role.yaml
+- sipnumber_editor_role.yaml
+- sipnumber_viewer_role.yaml
 - egressconfig_admin_role.yaml
 - egressconfig_editor_role.yaml
 - egressconfig_viewer_role.yaml
