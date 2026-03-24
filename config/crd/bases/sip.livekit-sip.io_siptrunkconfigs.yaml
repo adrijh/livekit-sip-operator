@@ -1,0 +1,110 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.18.0
+  name: siptrunkconfigs.sip.livekit-sip.io
+spec:
+  group: sip.livekit-sip.io
+  names:
+    kind: SIPTrunkConfig
+    listKind: SIPTrunkConfigList
+    plural: siptrunkconfigs
+    singular: siptrunkconfig
+  scope: Namespaced
+  versions:
+  - name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          SIPTrunkConfig is the Schema for the siptrunkconfigs API.
+          It defines shared SIP trunk configuration (provider credentials, allowed IPs, etc.)
+          that can be referenced by multiple SIPNumber resources.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              SIPTrunkConfigSpec defines the desired state of SIPTrunkConfig.
+              It holds shared trunk configuration that multiple SIPNumbers can inherit,
+              avoiding repetition of provider-specific settings like allowed addresses and auth.
+            properties:
+              allowedAddresses:
+                description: IP addresses or CIDR blocks allowed to use the trunk.
+                items:
+                  type: string
+                type: array
+              authSecretRef:
+                description: 'Reference to a Secret containing SIP auth credentials
+                  (keys: username, password).'
+                properties:
+                  name:
+                    description: Name of the Secret in the same namespace.
+                    type: string
+                required:
+                - name
+                type: object
+              krispEnabled:
+                description: Enable Krisp noise cancellation for the caller.
+                type: boolean
+              livekitRef:
+                description: Reference to the LiveKit server and API credentials.
+                properties:
+                  port:
+                    default: 7880
+                    description: Port of the LiveKit HTTP API on the Service.
+                    format: int32
+                    type: integer
+                  secretName:
+                    description: 'Name of the Secret containing LiveKit API credentials
+                      (keys: LIVEKIT_API_KEY, LIVEKIT_API_SECRET).'
+                    type: string
+                  service:
+                    description: |-
+                      Name of the LiveKit Kubernetes Service (in the same namespace).
+                      The operator connects via http://<service>:<port>.
+                    type: string
+                required:
+                - secretName
+                - service
+                type: object
+              maxCallDuration:
+                description: Maximum call duration.
+                type: string
+              mediaEncryption:
+                description: Media encryption mode.
+                enum:
+                - disable
+                - allow
+                - require
+                type: string
+              ringingTimeout:
+                description: Maximum time for the call to ring before timing out.
+                type: string
+            required:
+            - livekitRef
+            type: object
+          status:
+            description: SIPTrunkConfigStatus defines the observed state of SIPTrunkConfig.
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

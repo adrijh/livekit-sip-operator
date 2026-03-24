@@ -45,6 +45,11 @@ type AgentRouteSpec struct {
 	// +kubebuilder:validation:MinItems=1
 	NumberRefs []SIPNumberReference `json:"numberRefs"`
 
+	// Configuration for the individual dispatch rule (one room per call).
+	// If not set, defaults to roomPrefix "call-<agentName>-".
+	// +optional
+	Individual *SIPDispatchRuleIndividual `json:"individual,omitempty"`
+
 	// Hide the caller's phone number from participants.
 	// +optional
 	HidePhoneNumber bool `json:"hidePhoneNumber,omitempty"`

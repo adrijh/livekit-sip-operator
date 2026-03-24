@@ -57,15 +57,21 @@ spec:
               SIPNumberSpec defines the desired state of SIPNumber.
               A SIPNumber represents a single phone number (DID) and manages
               the lifecycle of the SIP inbound trunk backing it.
+
+              Trunk configuration can be provided via a SIPTrunkConfig reference
+              (trunkConfigRef) or inline. Inline fields override the referenced config.
             properties:
               allowedAddresses:
-                description: IP addresses or CIDR blocks allowed to use the trunk.
+                description: |-
+                  IP addresses or CIDR blocks allowed to use the trunk.
+                  Overrides (does not merge with) the value from trunkConfigRef if set.
                 items:
                   type: string
                 type: array
               authSecretRef:
-                description: 'Reference to a Secret containing SIP auth credentials
-                  (keys: username, password).'
+                description: |-
+                  Reference to a Secret containing SIP auth credentials (keys: username, password).
+                  Overrides the value from trunkConfigRef if set.
                 properties:
                   name:
                     description: Name of the Secret in the same namespace.
@@ -74,10 +80,14 @@ spec:
                 - name
                 type: object
               krispEnabled:
-                description: Enable Krisp noise cancellation for the caller.
+                description: |-
+                  Enable Krisp noise cancellation for the caller.
+                  Overrides the value from trunkConfigRef if set.
                 type: boolean
               livekitRef:
-                description: Reference to the LiveKit server and API credentials.
+                description: |-
+                  Reference to the LiveKit server and API credentials.
+                  Required if trunkConfigRef is not set.
                 properties:
                   port:
                     default: 7880
@@ -98,10 +108,14 @@ spec:
                 - service
                 type: object
               maxCallDuration:
-                description: Maximum call duration.
+                description: |-
+                  Maximum call duration.
+                  Overrides the value from trunkConfigRef if set.
                 type: string
               mediaEncryption:
-                description: Media encryption mode.
+                description: |-
+                  Media encryption mode.
+                  Overrides the value from trunkConfigRef if set.
                 enum:
                 - disable
                 - allow
@@ -112,10 +126,23 @@ spec:
                 pattern: ^\+[1-9]\d{1,14}$
                 type: string
               ringingTimeout:
-                description: Maximum time for the call to ring before timing out.
+                description: |-
+                  Maximum time for the call to ring before timing out.
+                  Overrides the value from trunkConfigRef if set.
                 type: string
+              trunkConfigRef:
+                description: |-
+                  Reference to a SIPTrunkConfig that provides shared trunk configuration.
+                  If set, livekitRef and other fields are inherited from the config
+                  and can be overridden inline.
+                properties:
+                  name:
+                    description: Name of the SIPTrunkConfig resource.
+                    type: string
+                required:
+                - name
+                type: object
             required:
-            - livekitRef
             - number
             type: object
           status:

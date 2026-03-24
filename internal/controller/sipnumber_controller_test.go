@@ -52,7 +52,7 @@ var _ = Describe("SIPNumber Controller", func() {
 						Namespace: "default",
 					},
 					Spec: sipv1alpha1.SIPNumberSpec{
-						LivekitRef: sipv1alpha1.LivekitReference{
+						LivekitRef: &sipv1alpha1.LivekitReference{
 							Service:    "livekit-server",
 							SecretName: "livekit-credentials",
 						},

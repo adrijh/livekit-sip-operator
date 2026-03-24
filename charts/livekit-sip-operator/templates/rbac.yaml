@@ -25,6 +25,7 @@ rules:
   - sip.livekit-sip.io
   resources:
   - egressconfigs
+  - siptrunkconfigs
   verbs:
   - get
   - list

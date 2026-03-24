@@ -20,9 +20,6 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/livekit/protocol/livekit"
-	lksdk "github.com/livekit/server-sdk-go/v2"
-	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -36,8 +33,21 @@ import (
 	sipv1alpha1 "github.com/adrijh/livekit-sip-operator/api/v1alpha1"
 )
 
+// resolvedNumberConfig holds the merged configuration for a SIPNumber,
+// combining SIPTrunkConfig defaults with inline overrides.
+type resolvedNumberConfig struct {
+	livekitRef       sipv1alpha1.LivekitReference
+	authSecretRef    *sipv1alpha1.SecretReference
+	allowedAddresses []string
+	krispEnabled     bool
+	mediaEncryption  sipv1alpha1.SIPMediaEncryption
+	ringingTimeout   *metav1.Duration
+	maxCallDuration  *metav1.Duration
+}
+
 // SIPNumberReconciler reconciles a SIPNumber object.
-// It manages the lifecycle of a single SIP inbound trunk per phone number.
+// It manages the lifecycle of a SIPInboundTrunk CR for each phone number,
+// delegating the actual LiveKit API interaction to the SIPInboundTrunk controller.
 type SIPNumberReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
@@ -46,7 +56,8 @@ type SIPNumberReconciler struct {
 // +kubebuilder:rbac:groups=sip.livekit-sip.io,resources=sipnumbers,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=sip.livekit-sip.io,resources=sipnumbers/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=sip.livekit-sip.io,resources=sipnumbers/finalizers,verbs=update
-// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
+// +kubebuilder:rbac:groups=sip.livekit-sip.io,resources=sipinboundtrunks,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=sip.livekit-sip.io,resources=siptrunkconfigs,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 func (r *SIPNumberReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -62,233 +73,188 @@ func (r *SIPNumberReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{}, fmt.Errorf("fetching SIPNumber: %w", err)
 	}
 
-	// ── 2. Handle deletion (finalizer) ───────────────────────────────────
+	// ── 2. Handle deletion ──────────────────────────────────────────────
+	// Owner references handle cascading deletion: when SIPNumber is deleted,
+	// the owned SIPInboundTrunk is garbage collected, and its finalizer
+	// handles the LiveKit API cleanup.
 	if !number.DeletionTimestamp.IsZero() {
-		return r.reconcileDelete(ctx, number)
+		return ctrl.Result{}, nil
 	}
 
-	// ── 3. Ensure finalizer ──────────────────────────────────────────────
-	if !controllerutil.ContainsFinalizer(number, finalizerName) {
-		controllerutil.AddFinalizer(number, finalizerName)
-		if err := r.Update(ctx, number); err != nil {
-			return ctrl.Result{}, fmt.Errorf("adding finalizer: %w", err)
-		}
-		return ctrl.Result{Requeue: true}, nil
-	}
-
-	// ── 4. Resolve LiveKit client ────────────────────────────────────────
-	sipClient, err := resolveLiveKitClient(ctx, r.Client, number.Namespace, number.Spec.LivekitRef)
+	// ── 3. Resolve merged config (SIPTrunkConfig + inline overrides) ─────
+	cfg, err := r.resolveConfig(ctx, number)
 	if err != nil {
-		r.setCondition(number, conditionLiveKitReady, metav1.ConditionFalse, "LiveKitSecretError", err.Error())
-		r.setReadyCondition(number, false, "LiveKitSecretError", err.Error())
+		r.setCondition(number, conditionSynced, metav1.ConditionFalse, "ConfigError", err.Error())
+		r.setReadyCondition(number, false, "ConfigError", err.Error())
 		if statusErr := r.Status().Update(ctx, number); statusErr != nil {
-			log.Error(statusErr, "failed to update status after LiveKit secret error")
+			log.Error(statusErr, "failed to update status after config error")
 		}
 		return ctrl.Result{RequeueAfter: requeueOnError}, nil
 	}
-	r.setCondition(number, conditionLiveKitReady, metav1.ConditionTrue, "LiveKitSecretResolved", "LiveKit credentials read successfully")
 
-	// ── 5. Resolve auth secret (if referenced) ──────────────────────────
-	authUser, authPass, err := r.resolveAuthSecret(ctx, number)
+	// ── 4. Create or update the child SIPInboundTrunk CR ─────────────────
+	childTrunk, err := r.reconcileInboundTrunk(ctx, number, cfg)
 	if err != nil {
-		r.setCondition(number, conditionSecretRead, metav1.ConditionFalse, "SecretReadError", err.Error())
-		r.setReadyCondition(number, false, "SecretReadError", err.Error())
+		r.setCondition(number, conditionSynced, metav1.ConditionFalse, "SyncFailed", err.Error())
+		r.setReadyCondition(number, false, "SyncFailed", err.Error())
 		if statusErr := r.Status().Update(ctx, number); statusErr != nil {
-			log.Error(statusErr, "failed to update status after secret error")
+			log.Error(statusErr, "failed to update status after sync error")
 		}
 		return ctrl.Result{RequeueAfter: requeueOnError}, nil
+	}
+
+	// ── 5. Propagate child status to SIPNumber status ────────────────────
+	number.Status.TrunkID = childTrunk.Status.TrunkID
+	number.Status.ObservedGeneration = number.Generation
+
+	if childTrunk.Status.TrunkID == "" {
+		// Child trunk hasn't been reconciled yet
+		r.setCondition(number, conditionSynced, metav1.ConditionTrue, "TrunkCreated", "SIPInboundTrunk CR created, waiting for trunk provisioning")
+		r.setReadyCondition(number, false, "Pending", "Waiting for SIPInboundTrunk to be provisioned")
+	} else {
+		// Check the child's Ready condition
+		childReady := meta.FindStatusCondition(childTrunk.Status.Conditions, conditionReady)
+		if childReady != nil && childReady.Status == metav1.ConditionTrue {
+			now := metav1.Now()
+			number.Status.LastSyncedAt = &now
+			r.setCondition(number, conditionSynced, metav1.ConditionTrue, "Synced", "SIPInboundTrunk is synced")
+			r.setReadyCondition(number, true, "Ready", fmt.Sprintf("Number %s is active (trunk %s)", number.Spec.Number, childTrunk.Status.TrunkID))
+		} else {
+			reason := "Pending"
+			msg := "SIPInboundTrunk is not yet ready"
+			if childReady != nil {
+				reason = childReady.Reason
+				msg = childReady.Message
+			}
+			r.setCondition(number, conditionSynced, metav1.ConditionTrue, "TrunkCreated", "SIPInboundTrunk CR exists")
+			r.setReadyCondition(number, false, reason, msg)
+		}
+	}
+
+	if err := r.Status().Update(ctx, number); err != nil {
+		return ctrl.Result{}, fmt.Errorf("updating SIPNumber status: %w", err)
+	}
+
+	return ctrl.Result{}, nil
+}
+
+// ─── Config resolution ───────────────────────────────────────────────────────
+
+// resolveConfig merges SIPTrunkConfig defaults with inline SIPNumber overrides.
+func (r *SIPNumberReconciler) resolveConfig(
+	ctx context.Context,
+	number *sipv1alpha1.SIPNumber,
+) (*resolvedNumberConfig, error) {
+	cfg := &resolvedNumberConfig{}
+
+	// Start with SIPTrunkConfig defaults if referenced
+	if number.Spec.TrunkConfigRef != nil {
+		trunkConfig := &sipv1alpha1.SIPTrunkConfig{}
+		key := types.NamespacedName{
+			Namespace: number.Namespace,
+			Name:      number.Spec.TrunkConfigRef.Name,
+		}
+		if err := r.Get(ctx, key, trunkConfig); err != nil {
+			return nil, fmt.Errorf("fetching SIPTrunkConfig %q: %w", key.Name, err)
+		}
+
+		cfg.livekitRef = trunkConfig.Spec.LivekitRef
+		cfg.authSecretRef = trunkConfig.Spec.AuthSecretRef
+		cfg.allowedAddresses = trunkConfig.Spec.AllowedAddresses
+		cfg.krispEnabled = trunkConfig.Spec.KrispEnabled
+		cfg.mediaEncryption = trunkConfig.Spec.MediaEncryption
+		cfg.ringingTimeout = trunkConfig.Spec.RingingTimeout
+		cfg.maxCallDuration = trunkConfig.Spec.MaxCallDuration
+	}
+
+	// Apply inline overrides
+	if number.Spec.LivekitRef != nil {
+		cfg.livekitRef = *number.Spec.LivekitRef
 	}
 	if number.Spec.AuthSecretRef != nil {
-		r.setCondition(number, conditionSecretRead, metav1.ConditionTrue, "SecretResolved", "Auth secret read successfully")
+		cfg.authSecretRef = number.Spec.AuthSecretRef
+	}
+	if len(number.Spec.AllowedAddresses) > 0 {
+		cfg.allowedAddresses = number.Spec.AllowedAddresses
+	}
+	if number.Spec.KrispEnabled != nil {
+		cfg.krispEnabled = *number.Spec.KrispEnabled
+	}
+	if number.Spec.MediaEncryption != "" {
+		cfg.mediaEncryption = number.Spec.MediaEncryption
+	}
+	if number.Spec.RingingTimeout != nil {
+		cfg.ringingTimeout = number.Spec.RingingTimeout
+	}
+	if number.Spec.MaxCallDuration != nil {
+		cfg.maxCallDuration = number.Spec.MaxCallDuration
 	}
 
-	// ── 6. Create or Update the trunk in LiveKit ─────────────────────────
-	if number.Status.TrunkID == "" {
-		return r.reconcileCreate(ctx, number, sipClient, authUser, authPass)
+	// Validate that we have a livekitRef from somewhere
+	if cfg.livekitRef.Service == "" || cfg.livekitRef.SecretName == "" {
+		return nil, fmt.Errorf("livekitRef is required: set it inline or via trunkConfigRef")
 	}
-	return r.reconcileUpdate(ctx, number, sipClient, authUser, authPass)
+
+	return cfg, nil
 }
 
-// ─── Reconcile sub-routines ──────────────────────────────────────────────────
+// ─── Child resource management ───────────────────────────────────────────────
 
-func (r *SIPNumberReconciler) reconcileCreate(
+// reconcileInboundTrunk creates or updates the child SIPInboundTrunk CR
+// that is owned by the SIPNumber. The SIPInboundTrunk controller handles
+// the actual LiveKit API interaction.
+func (r *SIPNumberReconciler) reconcileInboundTrunk(
 	ctx context.Context,
 	number *sipv1alpha1.SIPNumber,
-	sipClient *lksdk.SIPClient,
-	authUser, authPass string,
-) (ctrl.Result, error) {
+	cfg *resolvedNumberConfig,
+) (*sipv1alpha1.SIPInboundTrunk, error) {
 	log := logf.FromContext(ctx)
-	log.Info("Creating SIP inbound trunk for number", "number", number.Spec.Number)
 
-	req := &livekit.CreateSIPInboundTrunkRequest{
-		Trunk: r.buildTrunkInfo(number, authUser, authPass),
-	}
+	childName := number.Name
+	child := &sipv1alpha1.SIPInboundTrunk{}
+	child.Name = childName
+	child.Namespace = number.Namespace
 
-	info, err := sipClient.CreateSIPInboundTrunk(ctx, req)
-	if err != nil {
-		r.setCondition(number, conditionSynced, metav1.ConditionFalse, "CreateFailed", err.Error())
-		r.setReadyCondition(number, false, "CreateFailed", err.Error())
-		if statusErr := r.Status().Update(ctx, number); statusErr != nil {
-			log.Error(statusErr, "failed to update status after create error")
+	result, err := controllerutil.CreateOrUpdate(ctx, r.Client, child, func() error {
+		// Set the owner reference so the child is garbage collected
+		// when the SIPNumber is deleted.
+		if err := controllerutil.SetControllerReference(number, child, r.Scheme); err != nil {
+			return fmt.Errorf("setting owner reference: %w", err)
 		}
-		return ctrl.Result{RequeueAfter: requeueOnError}, fmt.Errorf("creating trunk in LiveKit: %w", err)
-	}
 
-	number.Status.TrunkID = info.SipTrunkId
-	number.Status.ObservedGeneration = number.Generation
-	now := metav1.Now()
-	number.Status.LastSyncedAt = &now
+		// Set labels for easy identification
+		if child.Labels == nil {
+			child.Labels = make(map[string]string)
+		}
+		child.Labels["sip.livekit-sip.io/managed-by"] = "sipnumber"
+		child.Labels["sip.livekit-sip.io/sipnumber"] = number.Name
 
-	r.setCondition(number, conditionSynced, metav1.ConditionTrue, "Created", "Trunk created in LiveKit")
-	r.setReadyCondition(number, true, "Ready", fmt.Sprintf("Number %s is active (trunk %s)", number.Spec.Number, info.SipTrunkId))
+		// Build the desired spec
+		child.Spec = sipv1alpha1.SIPInboundTrunkSpec{
+			LivekitRef:       cfg.livekitRef,
+			Name:             fmt.Sprintf("sipnumber-%s", number.Name),
+			Numbers:          []string{number.Spec.Number},
+			AllowedAddresses: cfg.allowedAddresses,
+			AuthSecretRef:    cfg.authSecretRef,
+			KrispEnabled:     cfg.krispEnabled,
+			MediaEncryption:  cfg.mediaEncryption,
+			RingingTimeout:   cfg.ringingTimeout,
+			MaxCallDuration:  cfg.maxCallDuration,
+		}
 
-	if err := r.Status().Update(ctx, number); err != nil {
-		return ctrl.Result{}, fmt.Errorf("updating status after create: %w", err)
-	}
-
-	log.Info("SIP inbound trunk created for number", "number", number.Spec.Number, "trunkID", info.SipTrunkId)
-	return ctrl.Result{}, nil
-}
-
-func (r *SIPNumberReconciler) reconcileUpdate(
-	ctx context.Context,
-	number *sipv1alpha1.SIPNumber,
-	sipClient *lksdk.SIPClient,
-	authUser, authPass string,
-) (ctrl.Result, error) {
-	log := logf.FromContext(ctx)
-
-	if number.Status.ObservedGeneration == number.Generation {
-		return ctrl.Result{}, nil
-	}
-
-	log.Info("Updating SIP inbound trunk for number", "number", number.Spec.Number, "trunkID", number.Status.TrunkID)
-
-	trunkInfo := r.buildTrunkInfo(number, authUser, authPass)
-	trunkInfo.SipTrunkId = number.Status.TrunkID
-
-	_, err := sipClient.UpdateSIPInboundTrunk(ctx, &livekit.UpdateSIPInboundTrunkRequest{
-		SipTrunkId: number.Status.TrunkID,
-		Action: &livekit.UpdateSIPInboundTrunkRequest_Replace{
-			Replace: trunkInfo,
-		},
+		return nil
 	})
 	if err != nil {
-		r.setCondition(number, conditionSynced, metav1.ConditionFalse, "UpdateFailed", err.Error())
-		r.setReadyCondition(number, false, "UpdateFailed", err.Error())
-		if statusErr := r.Status().Update(ctx, number); statusErr != nil {
-			log.Error(statusErr, "failed to update status after update error")
-		}
-		return ctrl.Result{RequeueAfter: requeueOnError}, fmt.Errorf("updating trunk in LiveKit: %w", err)
+		return nil, fmt.Errorf("creating/updating SIPInboundTrunk %q: %w", childName, err)
 	}
 
-	number.Status.ObservedGeneration = number.Generation
-	now := metav1.Now()
-	number.Status.LastSyncedAt = &now
+	log.Info("Reconciled child SIPInboundTrunk",
+		"name", childName,
+		"operation", result,
+		"number", number.Spec.Number,
+	)
 
-	r.setCondition(number, conditionSynced, metav1.ConditionTrue, "Updated", "Trunk updated in LiveKit")
-	r.setReadyCondition(number, true, "Ready", fmt.Sprintf("Number %s is active (trunk %s)", number.Spec.Number, number.Status.TrunkID))
-
-	if err := r.Status().Update(ctx, number); err != nil {
-		return ctrl.Result{}, fmt.Errorf("updating status after update: %w", err)
-	}
-
-	log.Info("SIP inbound trunk updated for number", "number", number.Spec.Number, "trunkID", number.Status.TrunkID)
-	return ctrl.Result{}, nil
-}
-
-func (r *SIPNumberReconciler) reconcileDelete(
-	ctx context.Context,
-	number *sipv1alpha1.SIPNumber,
-) (ctrl.Result, error) {
-	log := logf.FromContext(ctx)
-
-	if !controllerutil.ContainsFinalizer(number, finalizerName) {
-		return ctrl.Result{}, nil
-	}
-
-	if number.Status.TrunkID != "" {
-		sipClient, err := resolveLiveKitClient(ctx, r.Client, number.Namespace, number.Spec.LivekitRef)
-		if err != nil {
-			log.Error(err, "failed to resolve LiveKit client for deletion, proceeding with finalizer removal")
-		} else {
-			log.Info("Deleting SIP inbound trunk from LiveKit", "trunkID", number.Status.TrunkID)
-			_, err := sipClient.DeleteSIPTrunk(ctx, &livekit.DeleteSIPTrunkRequest{
-				SipTrunkId: number.Status.TrunkID,
-			})
-			if err != nil {
-				log.Error(err, "failed to delete trunk from LiveKit, proceeding with finalizer removal")
-			}
-		}
-	}
-
-	controllerutil.RemoveFinalizer(number, finalizerName)
-	if err := r.Update(ctx, number); err != nil {
-		return ctrl.Result{}, fmt.Errorf("removing finalizer: %w", err)
-	}
-
-	log.Info("SIPNumber deleted", "number", number.Spec.Number)
-	return ctrl.Result{}, nil
-}
-
-// ─── LiveKit request builders ────────────────────────────────────────────────
-
-func (r *SIPNumberReconciler) buildTrunkInfo(
-	number *sipv1alpha1.SIPNumber,
-	authUser, authPass string,
-) *livekit.SIPInboundTrunkInfo {
-	info := &livekit.SIPInboundTrunkInfo{
-		Name:             fmt.Sprintf("sipnumber-%s", number.Name),
-		Numbers:          []string{number.Spec.Number},
-		AllowedAddresses: number.Spec.AllowedAddresses,
-		AuthUsername:     authUser,
-		AuthPassword:     authPass,
-		KrispEnabled:     number.Spec.KrispEnabled,
-	}
-
-	if number.Spec.MediaEncryption != "" {
-		info.MediaEncryption = mediaEncryptionToProto(number.Spec.MediaEncryption)
-	}
-
-	if number.Spec.RingingTimeout != nil {
-		info.RingingTimeout = durationToProto(number.Spec.RingingTimeout.Duration)
-	}
-
-	if number.Spec.MaxCallDuration != nil {
-		info.MaxCallDuration = durationToProto(number.Spec.MaxCallDuration.Duration)
-	}
-
-	return info
-}
-
-// ─── Secret resolution ───────────────────────────────────────────────────────
-
-func (r *SIPNumberReconciler) resolveAuthSecret(
-	ctx context.Context,
-	number *sipv1alpha1.SIPNumber,
-) (string, string, error) {
-	if number.Spec.AuthSecretRef == nil {
-		return "", "", nil
-	}
-
-	secret := &corev1.Secret{}
-	key := types.NamespacedName{
-		Namespace: number.Namespace,
-		Name:      number.Spec.AuthSecretRef.Name,
-	}
-
-	if err := r.Get(ctx, key, secret); err != nil {
-		return "", "", fmt.Errorf("reading auth secret %q: %w", key, err)
-	}
-
-	username := string(secret.Data["username"])
-	password := string(secret.Data["password"])
-
-	if username == "" || password == "" {
-		return "", "", fmt.Errorf("auth secret %q missing 'username' or 'password' key", key)
-	}
-
-	return username, password, nil
+	return child, nil
 }
 
 // ─── Condition helpers ───────────────────────────────────────────────────────
@@ -323,9 +289,12 @@ func (r *SIPNumberReconciler) setReadyCondition(
 // ─── Controller setup ────────────────────────────────────────────────────────
 
 // SetupWithManager sets up the controller with the Manager.
+// It watches SIPNumber resources and also watches owned SIPInboundTrunk
+// resources to propagate their status back to the parent SIPNumber.
 func (r *SIPNumberReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&sipv1alpha1.SIPNumber{}).
+		Owns(&sipv1alpha1.SIPInboundTrunk{}).
 		Named("sipnumber").
 		Complete(r)
 }

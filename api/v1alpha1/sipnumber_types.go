@@ -23,10 +23,20 @@ import (
 // SIPNumberSpec defines the desired state of SIPNumber.
 // A SIPNumber represents a single phone number (DID) and manages
 // the lifecycle of the SIP inbound trunk backing it.
+//
+// Trunk configuration can be provided via a SIPTrunkConfig reference
+// (trunkConfigRef) or inline. Inline fields override the referenced config.
 type SIPNumberSpec struct {
+	// Reference to a SIPTrunkConfig that provides shared trunk configuration.
+	// If set, livekitRef and other fields are inherited from the config
+	// and can be overridden inline.
+	// +optional
+	TrunkConfigRef *SIPTrunkConfigReference `json:"trunkConfigRef,omitempty"`
+
 	// Reference to the LiveKit server and API credentials.
-	// +kubebuilder:validation:Required
-	LivekitRef LivekitReference `json:"livekitRef"`
+	// Required if trunkConfigRef is not set.
+	// +optional
+	LivekitRef *LivekitReference `json:"livekitRef,omitempty"`
 
 	// The phone number (DID) in E.164 format (e.g. "+15551234567").
 	// +kubebuilder:validation:Required
@@ -34,26 +44,32 @@ type SIPNumberSpec struct {
 	Number string `json:"number"`
 
 	// Reference to a Secret containing SIP auth credentials (keys: username, password).
+	// Overrides the value from trunkConfigRef if set.
 	// +optional
 	AuthSecretRef *SecretReference `json:"authSecretRef,omitempty"`
 
 	// IP addresses or CIDR blocks allowed to use the trunk.
+	// Overrides (does not merge with) the value from trunkConfigRef if set.
 	// +optional
 	AllowedAddresses []string `json:"allowedAddresses,omitempty"`
 
 	// Enable Krisp noise cancellation for the caller.
+	// Overrides the value from trunkConfigRef if set.
 	// +optional
-	KrispEnabled bool `json:"krispEnabled,omitempty"`
+	KrispEnabled *bool `json:"krispEnabled,omitempty"`
 
 	// Media encryption mode.
+	// Overrides the value from trunkConfigRef if set.
 	// +optional
 	MediaEncryption SIPMediaEncryption `json:"mediaEncryption,omitempty"`
 
 	// Maximum time for the call to ring before timing out.
+	// Overrides the value from trunkConfigRef if set.
 	// +optional
 	RingingTimeout *metav1.Duration `json:"ringingTimeout,omitempty"`
 
 	// Maximum call duration.
+	// Overrides the value from trunkConfigRef if set.
 	// +optional
 	MaxCallDuration *metav1.Duration `json:"maxCallDuration,omitempty"`
 }

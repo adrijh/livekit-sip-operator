@@ -64,4 +64,12 @@ resources:
   kind: AgentRoute
   path: github.com/adrijh/livekit-sip-operator/api/v1alpha1
   version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  domain: livekit-sip.io
+  group: sip
+  kind: SIPTrunkConfig
+  path: github.com/adrijh/livekit-sip-operator/api/v1alpha1
+  version: v1alpha1
 version: "3"

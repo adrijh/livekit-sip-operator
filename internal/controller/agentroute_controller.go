@@ -22,9 +22,6 @@ import (
 	"slices"
 	"sort"
 
-	"github.com/livekit/protocol/livekit"
-	lksdk "github.com/livekit/server-sdk-go/v2"
-	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -41,6 +38,8 @@ import (
 )
 
 // AgentRouteReconciler reconciles an AgentRoute object.
+// It creates and manages a child SIPDispatchRule CR, delegating the actual
+// LiveKit API interaction to the SIPDispatchRule controller.
 // It watches SIPNumber resources and keeps the dispatch rule's trunk_ids
 // list in sync with the referenced SIPNumbers' trunk IDs.
 type AgentRouteReconciler struct {
@@ -52,8 +51,8 @@ type AgentRouteReconciler struct {
 // +kubebuilder:rbac:groups=sip.livekit-sip.io,resources=agentroutes/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=sip.livekit-sip.io,resources=agentroutes/finalizers,verbs=update
 // +kubebuilder:rbac:groups=sip.livekit-sip.io,resources=sipnumbers,verbs=get;list;watch
+// +kubebuilder:rbac:groups=sip.livekit-sip.io,resources=sipdispatchrules,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=sip.livekit-sip.io,resources=egressconfigs,verbs=get;list;watch
-// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 func (r *AgentRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -69,33 +68,15 @@ func (r *AgentRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, fmt.Errorf("fetching AgentRoute: %w", err)
 	}
 
-	// ── 2. Handle deletion (finalizer) ───────────────────────────────────
+	// ── 2. Handle deletion ──────────────────────────────────────────────
+	// Owner references handle cascading deletion: when AgentRoute is deleted,
+	// the owned SIPDispatchRule is garbage collected, and its finalizer
+	// handles the LiveKit API cleanup.
 	if !route.DeletionTimestamp.IsZero() {
-		return r.reconcileDelete(ctx, route)
+		return ctrl.Result{}, nil
 	}
 
-	// ── 3. Ensure finalizer ──────────────────────────────────────────────
-	if !controllerutil.ContainsFinalizer(route, finalizerName) {
-		controllerutil.AddFinalizer(route, finalizerName)
-		if err := r.Update(ctx, route); err != nil {
-			return ctrl.Result{}, fmt.Errorf("adding finalizer: %w", err)
-		}
-		return ctrl.Result{Requeue: true}, nil
-	}
-
-	// ── 4. Resolve LiveKit client ────────────────────────────────────────
-	sipClient, err := resolveLiveKitClient(ctx, r.Client, route.Namespace, route.Spec.LivekitRef)
-	if err != nil {
-		r.setCondition(route, conditionLiveKitReady, metav1.ConditionFalse, "LiveKitSecretError", err.Error())
-		r.setReadyCondition(route, false, "LiveKitSecretError", err.Error())
-		if statusErr := r.Status().Update(ctx, route); statusErr != nil {
-			log.Error(statusErr, "failed to update status after LiveKit secret error")
-		}
-		return ctrl.Result{RequeueAfter: requeueOnError}, nil
-	}
-	r.setCondition(route, conditionLiveKitReady, metav1.ConditionTrue, "LiveKitSecretResolved", "LiveKit credentials read successfully")
-
-	// ── 5. Collect trunk IDs from referenced SIPNumbers ──────────────────
+	// ── 3. Collect trunk IDs from referenced SIPNumbers ──────────────────
 	trunkIDs, pendingNumbers, err := r.collectTrunkIDs(ctx, route)
 	if err != nil {
 		r.setCondition(route, conditionSynced, metav1.ConditionFalse, "TrunkIDCollectionError", err.Error())
@@ -116,160 +97,51 @@ func (r *AgentRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{RequeueAfter: requeueOnPending}, nil
 	}
 
-	// ── 6. Resolve room config (EgressConfig references + secrets) ───────
-	var roomConfig *livekit.RoomConfiguration
-	roomConfig, err = r.buildRoomConfig(ctx, route)
+	// ── 4. Build the room config for the dispatch rule ───────────────────
+	roomConfig := r.buildRoomConfig(route)
+
+	// ── 5. Create or update the child SIPDispatchRule CR ─────────────────
+	childRule, err := r.reconcileDispatchRule(ctx, route, trunkIDs, roomConfig)
 	if err != nil {
-		r.setCondition(route, conditionSynced, metav1.ConditionFalse, "RoomConfigError", err.Error())
-		r.setReadyCondition(route, false, "RoomConfigError", err.Error())
+		r.setCondition(route, conditionSynced, metav1.ConditionFalse, "SyncFailed", err.Error())
+		r.setReadyCondition(route, false, "SyncFailed", err.Error())
 		if statusErr := r.Status().Update(ctx, route); statusErr != nil {
-			log.Error(statusErr, "failed to update status after room config error")
+			log.Error(statusErr, "failed to update status after sync error")
 		}
 		return ctrl.Result{RequeueAfter: requeueOnError}, nil
 	}
 
-	// ── 7. Create or Update the dispatch rule in LiveKit ─────────────────
-	if route.Status.DispatchRuleID == "" {
-		return r.reconcileCreate(ctx, route, sipClient, trunkIDs, roomConfig)
-	}
-	return r.reconcileUpdate(ctx, route, sipClient, trunkIDs, roomConfig)
-}
-
-// ─── Reconcile sub-routines ──────────────────────────────────────────────────
-
-func (r *AgentRouteReconciler) reconcileCreate(
-	ctx context.Context,
-	route *sipv1alpha1.AgentRoute,
-	sipClient *lksdk.SIPClient,
-	trunkIDs []string,
-	roomConfig *livekit.RoomConfiguration,
-) (ctrl.Result, error) {
-	log := logf.FromContext(ctx)
-	log.Info("Creating SIP dispatch rule for agent", "agent", route.Spec.AgentName, "trunkIDs", trunkIDs)
-
-	ruleInfo := r.buildRuleInfo(route, trunkIDs)
-	ruleInfo.RoomConfig = roomConfig
-
-	info, err := sipClient.CreateSIPDispatchRule(ctx, &livekit.CreateSIPDispatchRuleRequest{
-		DispatchRule: ruleInfo,
-	})
-	if err != nil {
-		r.setCondition(route, conditionSynced, metav1.ConditionFalse, "CreateFailed", err.Error())
-		r.setReadyCondition(route, false, "CreateFailed", err.Error())
-		if statusErr := r.Status().Update(ctx, route); statusErr != nil {
-			log.Error(statusErr, "failed to update status after create error")
-		}
-		return ctrl.Result{RequeueAfter: requeueOnError}, fmt.Errorf("creating dispatch rule in LiveKit: %w", err)
-	}
-
-	route.Status.DispatchRuleID = info.SipDispatchRuleId
+	// ── 6. Propagate child status to AgentRoute status ───────────────────
+	route.Status.DispatchRuleID = childRule.Status.DispatchRuleID
 	route.Status.TrunkIDs = trunkIDs
 	route.Status.ObservedGeneration = route.Generation
-	now := metav1.Now()
-	route.Status.LastSyncedAt = &now
 
-	r.setCondition(route, conditionSynced, metav1.ConditionTrue, "Created", "Dispatch rule created in LiveKit")
-	r.setReadyCondition(route, true, "Ready", fmt.Sprintf("Agent %s routed via %d number(s)", route.Spec.AgentName, len(trunkIDs)))
-
-	if err := r.Status().Update(ctx, route); err != nil {
-		return ctrl.Result{}, fmt.Errorf("updating status after create: %w", err)
-	}
-
-	log.Info("SIP dispatch rule created", "ruleID", info.SipDispatchRuleId, "agent", route.Spec.AgentName)
-	return ctrl.Result{}, nil
-}
-
-func (r *AgentRouteReconciler) reconcileUpdate(
-	ctx context.Context,
-	route *sipv1alpha1.AgentRoute,
-	sipClient *lksdk.SIPClient,
-	trunkIDs []string,
-	roomConfig *livekit.RoomConfiguration,
-) (ctrl.Result, error) {
-	log := logf.FromContext(ctx)
-
-	// Check if anything actually changed: spec generation or trunk IDs.
-	specChanged := route.Status.ObservedGeneration != route.Generation
-	trunkIDsChanged := !trunkIDsEqual(route.Status.TrunkIDs, trunkIDs)
-
-	if !specChanged && !trunkIDsChanged {
-		return ctrl.Result{}, nil
-	}
-
-	log.Info("Updating SIP dispatch rule for agent",
-		"agent", route.Spec.AgentName,
-		"ruleID", route.Status.DispatchRuleID,
-		"trunkIDs", trunkIDs,
-		"specChanged", specChanged,
-		"trunkIDsChanged", trunkIDsChanged,
-	)
-
-	ruleInfo := r.buildRuleInfo(route, trunkIDs)
-	ruleInfo.SipDispatchRuleId = route.Status.DispatchRuleID
-	ruleInfo.RoomConfig = roomConfig
-
-	_, err := sipClient.UpdateSIPDispatchRule(ctx, &livekit.UpdateSIPDispatchRuleRequest{
-		SipDispatchRuleId: route.Status.DispatchRuleID,
-		Action: &livekit.UpdateSIPDispatchRuleRequest_Replace{
-			Replace: ruleInfo,
-		},
-	})
-	if err != nil {
-		r.setCondition(route, conditionSynced, metav1.ConditionFalse, "UpdateFailed", err.Error())
-		r.setReadyCondition(route, false, "UpdateFailed", err.Error())
-		if statusErr := r.Status().Update(ctx, route); statusErr != nil {
-			log.Error(statusErr, "failed to update status after update error")
-		}
-		return ctrl.Result{RequeueAfter: requeueOnError}, fmt.Errorf("updating dispatch rule in LiveKit: %w", err)
-	}
-
-	route.Status.TrunkIDs = trunkIDs
-	route.Status.ObservedGeneration = route.Generation
-	now := metav1.Now()
-	route.Status.LastSyncedAt = &now
-
-	r.setCondition(route, conditionSynced, metav1.ConditionTrue, "Updated", "Dispatch rule updated in LiveKit")
-	r.setReadyCondition(route, true, "Ready", fmt.Sprintf("Agent %s routed via %d number(s)", route.Spec.AgentName, len(trunkIDs)))
-
-	if err := r.Status().Update(ctx, route); err != nil {
-		return ctrl.Result{}, fmt.Errorf("updating status after update: %w", err)
-	}
-
-	log.Info("SIP dispatch rule updated", "ruleID", route.Status.DispatchRuleID, "agent", route.Spec.AgentName)
-	return ctrl.Result{}, nil
-}
-
-func (r *AgentRouteReconciler) reconcileDelete(
-	ctx context.Context,
-	route *sipv1alpha1.AgentRoute,
-) (ctrl.Result, error) {
-	log := logf.FromContext(ctx)
-
-	if !controllerutil.ContainsFinalizer(route, finalizerName) {
-		return ctrl.Result{}, nil
-	}
-
-	if route.Status.DispatchRuleID != "" {
-		sipClient, err := resolveLiveKitClient(ctx, r.Client, route.Namespace, route.Spec.LivekitRef)
-		if err != nil {
-			log.Error(err, "failed to resolve LiveKit client for deletion, proceeding with finalizer removal")
+	if childRule.Status.DispatchRuleID == "" {
+		r.setCondition(route, conditionSynced, metav1.ConditionTrue, "RuleCreated", "SIPDispatchRule CR created, waiting for provisioning")
+		r.setReadyCondition(route, false, "Pending", "Waiting for SIPDispatchRule to be provisioned")
+	} else {
+		childReady := meta.FindStatusCondition(childRule.Status.Conditions, conditionReady)
+		if childReady != nil && childReady.Status == metav1.ConditionTrue {
+			now := metav1.Now()
+			route.Status.LastSyncedAt = &now
+			r.setCondition(route, conditionSynced, metav1.ConditionTrue, "Synced", "SIPDispatchRule is synced")
+			r.setReadyCondition(route, true, "Ready", fmt.Sprintf("Agent %s routed via %d number(s)", route.Spec.AgentName, len(trunkIDs)))
 		} else {
-			log.Info("Deleting SIP dispatch rule from LiveKit", "ruleID", route.Status.DispatchRuleID)
-			_, err := sipClient.DeleteSIPDispatchRule(ctx, &livekit.DeleteSIPDispatchRuleRequest{
-				SipDispatchRuleId: route.Status.DispatchRuleID,
-			})
-			if err != nil {
-				log.Error(err, "failed to delete dispatch rule from LiveKit, proceeding with finalizer removal")
+			reason := "Pending"
+			msg := "SIPDispatchRule is not yet ready"
+			if childReady != nil {
+				reason = childReady.Reason
+				msg = childReady.Message
 			}
+			r.setCondition(route, conditionSynced, metav1.ConditionTrue, "RuleCreated", "SIPDispatchRule CR exists")
+			r.setReadyCondition(route, false, reason, msg)
 		}
 	}
 
-	controllerutil.RemoveFinalizer(route, finalizerName)
-	if err := r.Update(ctx, route); err != nil {
-		return ctrl.Result{}, fmt.Errorf("removing finalizer: %w", err)
+	if err := r.Status().Update(ctx, route); err != nil {
+		return ctrl.Result{}, fmt.Errorf("updating AgentRoute status: %w", err)
 	}
 
-	log.Info("AgentRoute deleted", "agent", route.Spec.AgentName)
 	return ctrl.Result{}, nil
 }
 
@@ -311,282 +183,103 @@ func (r *AgentRouteReconciler) collectTrunkIDs(
 	return trunkIDs, pendingNumbers, nil
 }
 
-// ─── LiveKit request builders ────────────────────────────────────────────────
+// ─── Child resource management ───────────────────────────────────────────────
 
-func (r *AgentRouteReconciler) buildRuleInfo(
+// reconcileDispatchRule creates or updates the child SIPDispatchRule CR
+// that is owned by the AgentRoute. The SIPDispatchRule controller handles
+// the actual LiveKit API interaction.
+func (r *AgentRouteReconciler) reconcileDispatchRule(
+	ctx context.Context,
 	route *sipv1alpha1.AgentRoute,
 	trunkIDs []string,
-) *livekit.SIPDispatchRuleInfo {
-	info := &livekit.SIPDispatchRuleInfo{
-		Name:            fmt.Sprintf("agentroute-%s", route.Name),
-		TrunkIds:        trunkIDs,
-		HidePhoneNumber: route.Spec.HidePhoneNumber,
-		KrispEnabled:    route.Spec.KrispEnabled,
-	}
+	roomConfig *sipv1alpha1.RoomConfig,
+) (*sipv1alpha1.SIPDispatchRule, error) {
+	log := logf.FromContext(ctx)
 
-	if route.Spec.MediaEncryption != "" {
-		info.MediaEncryption = mediaEncryptionToProto(route.Spec.MediaEncryption)
-	}
+	childName := route.Name
+	child := &sipv1alpha1.SIPDispatchRule{}
+	child.Name = childName
+	child.Namespace = route.Namespace
 
-	// AgentRoute always uses "individual" dispatch: one room per call,
-	// prefixed with the agent name. This is the natural pattern for
-	// agent-handled phone calls.
-	info.Rule = &livekit.SIPDispatchRule{
-		Rule: &livekit.SIPDispatchRule_DispatchRuleIndividual{
-			DispatchRuleIndividual: &livekit.SIPDispatchRuleIndividual{
+	result, err := controllerutil.CreateOrUpdate(ctx, r.Client, child, func() error {
+		// Set the owner reference so the child is garbage collected
+		// when the AgentRoute is deleted.
+		if err := controllerutil.SetControllerReference(route, child, r.Scheme); err != nil {
+			return fmt.Errorf("setting owner reference: %w", err)
+		}
+
+		// Set labels for easy identification
+		if child.Labels == nil {
+			child.Labels = make(map[string]string)
+		}
+		child.Labels["sip.livekit-sip.io/managed-by"] = "agentroute"
+		child.Labels["sip.livekit-sip.io/agentroute"] = route.Name
+
+		// Build the individual dispatch config, defaulting roomPrefix if not set
+		individual := route.Spec.Individual
+		if individual == nil {
+			individual = &sipv1alpha1.SIPDispatchRuleIndividual{
 				RoomPrefix: fmt.Sprintf("call-%s-", route.Spec.AgentName),
-			},
-		},
+			}
+		}
+
+		// Build the desired spec
+		child.Spec = sipv1alpha1.SIPDispatchRuleSpec{
+			LivekitRef:      route.Spec.LivekitRef,
+			Name:            fmt.Sprintf("agentroute-%s", route.Name),
+			Type:            sipv1alpha1.SIPDispatchRuleTypeIndividual,
+			Individual:      individual,
+			TrunkIDs:        trunkIDs,
+			HidePhoneNumber: route.Spec.HidePhoneNumber,
+			KrispEnabled:    route.Spec.KrispEnabled,
+			MediaEncryption: route.Spec.MediaEncryption,
+			RoomConfig:      roomConfig,
+		}
+
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("creating/updating SIPDispatchRule %q: %w", childName, err)
 	}
 
-	return info
+	log.Info("Reconciled child SIPDispatchRule",
+		"name", childName,
+		"operation", result,
+		"agent", route.Spec.AgentName,
+		"trunkIDs", trunkIDs,
+	)
+
+	return child, nil
 }
 
-// buildRoomConfig builds the RoomConfiguration for the dispatch rule.
-// It always includes the agent dispatch; optionally includes egress config.
+// ─── Room config builder ─────────────────────────────────────────────────────
+
+// buildRoomConfig builds the RoomConfig for the child SIPDispatchRule.
+// If roomConfig.agents is specified, those are used as-is.
+// Otherwise, the primary agent (from agentName) is dispatched automatically.
 func (r *AgentRouteReconciler) buildRoomConfig(
-	ctx context.Context,
 	route *sipv1alpha1.AgentRoute,
-) (*livekit.RoomConfiguration, error) {
-	config := &livekit.RoomConfiguration{}
+) *sipv1alpha1.RoomConfig {
+	config := &sipv1alpha1.RoomConfig{}
 
-	// Always dispatch the agent
-	config.Agents = []*livekit.RoomAgentDispatch{
-		{
-			AgentName: route.Spec.AgentName,
-			Metadata:  route.Spec.AgentMetadata,
-		},
-	}
-
-	// Handle additional room config (egress, extra agents, etc.)
-	if route.Spec.RoomConfig != nil {
-		rc := route.Spec.RoomConfig
-
-		// Add any extra agents from roomConfig
-		for _, a := range rc.Agents {
-			config.Agents = append(config.Agents, &livekit.RoomAgentDispatch{
-				AgentName: a.AgentName,
-				Metadata:  a.Metadata,
-			})
+	if route.Spec.RoomConfig != nil && len(route.Spec.RoomConfig.Agents) > 0 {
+		// Use the explicitly listed agents
+		config.Agents = route.Spec.RoomConfig.Agents
+		config.Egress = route.Spec.RoomConfig.Egress
+	} else {
+		// No agents specified in roomConfig — auto-dispatch the primary agent
+		config.Agents = []sipv1alpha1.RoomAgentDispatchConfig{
+			{
+				AgentName: route.Spec.AgentName,
+				Metadata:  route.Spec.AgentMetadata,
+			},
 		}
-
-		// Egress
-		if rc.Egress != nil && rc.Egress.Room != nil {
-			roomEgress, err := r.buildRoomCompositeEgress(ctx, route.Namespace, rc.Egress.Room)
-			if err != nil {
-				return nil, fmt.Errorf("building room egress: %w", err)
-			}
-			config.Egress = &livekit.RoomEgress{
-				Room: roomEgress,
-			}
+		if route.Spec.RoomConfig != nil {
+			config.Egress = route.Spec.RoomConfig.Egress
 		}
 	}
 
-	return config, nil
-}
-
-func (r *AgentRouteReconciler) buildRoomCompositeEgress(
-	ctx context.Context,
-	namespace string,
-	room *sipv1alpha1.RoomCompositeEgress,
-) (*livekit.RoomCompositeEgressRequest, error) {
-	req := &livekit.RoomCompositeEgressRequest{
-		RoomName:  room.RoomName,
-		AudioOnly: room.AudioOnly,
-	}
-
-	if room.AudioMixing == sipv1alpha1.AudioMixingDefault {
-		req.AudioMixing = livekit.AudioMixing_DEFAULT_MIXING
-	}
-
-	for _, fo := range room.FileOutputs {
-		output, err := r.buildEncodedFileOutput(ctx, namespace, &fo)
-		if err != nil {
-			return nil, err
-		}
-		req.FileOutputs = append(req.FileOutputs, output)
-	}
-
-	return req, nil
-}
-
-func (r *AgentRouteReconciler) buildEncodedFileOutput(
-	ctx context.Context,
-	namespace string,
-	fo *sipv1alpha1.FileOutput,
-) (*livekit.EncodedFileOutput, error) {
-	egressConfig := &sipv1alpha1.EgressConfig{}
-	if err := r.Get(ctx, types.NamespacedName{
-		Name:      fo.EgressConfigRef.Name,
-		Namespace: namespace,
-	}, egressConfig); err != nil {
-		return nil, fmt.Errorf("fetching EgressConfig %q: %w", fo.EgressConfigRef.Name, err)
-	}
-
-	output := &livekit.EncodedFileOutput{
-		Filepath: fo.Filepath,
-	}
-
-	spec := egressConfig.Spec
-	switch {
-	case spec.S3 != nil:
-		s3Upload, err := r.resolveS3Config(ctx, namespace, spec.S3)
-		if err != nil {
-			return nil, err
-		}
-		output.Output = &livekit.EncodedFileOutput_S3{S3: s3Upload}
-
-	case spec.Azure != nil:
-		azureUpload, err := r.resolveAzureConfig(ctx, namespace, spec.Azure)
-		if err != nil {
-			return nil, err
-		}
-		output.Output = &livekit.EncodedFileOutput_Azure{Azure: azureUpload}
-
-	case spec.GCP != nil:
-		gcpUpload, err := r.resolveGCPConfig(ctx, namespace, spec.GCP)
-		if err != nil {
-			return nil, err
-		}
-		output.Output = &livekit.EncodedFileOutput_Gcp{Gcp: gcpUpload}
-
-	case spec.AliOSS != nil:
-		aliUpload, err := r.resolveAliOSSConfig(ctx, namespace, spec.AliOSS)
-		if err != nil {
-			return nil, err
-		}
-		output.Output = &livekit.EncodedFileOutput_AliOSS{AliOSS: aliUpload}
-
-	default:
-		return nil, fmt.Errorf("EgressConfig %q has no storage backend configured", egressConfig.Name)
-	}
-
-	return output, nil
-}
-
-// ─── Secret resolution helpers (same pattern as SIPDispatchRule) ──────────────
-
-func (r *AgentRouteReconciler) resolveSecretKey(
-	ctx context.Context,
-	namespace string,
-	ref sipv1alpha1.SecretKeySelector,
-	defaultKey string,
-) (string, error) {
-	secret := &corev1.Secret{}
-	if err := r.Get(ctx, types.NamespacedName{
-		Name:      ref.Name,
-		Namespace: namespace,
-	}, secret); err != nil {
-		return "", fmt.Errorf("fetching secret %q: %w", ref.Name, err)
-	}
-
-	key := defaultKey
-	if ref.Key != "" {
-		key = ref.Key
-	}
-
-	val, ok := secret.Data[key]
-	if !ok {
-		return "", fmt.Errorf("key %q not found in secret %q", key, ref.Name)
-	}
-	return string(val), nil
-}
-
-func (r *AgentRouteReconciler) resolveS3Config(
-	ctx context.Context,
-	namespace string,
-	cfg *sipv1alpha1.S3Config,
-) (*livekit.S3Upload, error) {
-	accessKey, err := r.resolveSecretKey(ctx, namespace, cfg.AccessKeyRef, "access_key")
-	if err != nil {
-		return nil, fmt.Errorf("resolving S3 access key: %w", err)
-	}
-
-	secretKey, err := r.resolveSecretKey(ctx, namespace, cfg.SecretKeyRef, "secret")
-	if err != nil {
-		return nil, fmt.Errorf("resolving S3 secret: %w", err)
-	}
-
-	upload := &livekit.S3Upload{
-		AccessKey:      accessKey,
-		Secret:         secretKey,
-		Region:         cfg.Region,
-		Endpoint:       cfg.Endpoint,
-		Bucket:         cfg.Bucket,
-		ForcePathStyle: cfg.ForcePathStyle,
-	}
-
-	if cfg.SessionTokenRef != nil {
-		token, err := r.resolveSecretKey(ctx, namespace, *cfg.SessionTokenRef, "session_token")
-		if err != nil {
-			return nil, fmt.Errorf("resolving S3 session token: %w", err)
-		}
-		upload.SessionToken = token
-	}
-
-	return upload, nil
-}
-
-func (r *AgentRouteReconciler) resolveAzureConfig(
-	ctx context.Context,
-	namespace string,
-	cfg *sipv1alpha1.AzureConfig,
-) (*livekit.AzureBlobUpload, error) {
-	accountName, err := r.resolveSecretKey(ctx, namespace, cfg.AccountNameRef, "account_name")
-	if err != nil {
-		return nil, fmt.Errorf("resolving Azure account name: %w", err)
-	}
-
-	accountKey, err := r.resolveSecretKey(ctx, namespace, cfg.AccountKeyRef, "account_key")
-	if err != nil {
-		return nil, fmt.Errorf("resolving Azure account key: %w", err)
-	}
-
-	return &livekit.AzureBlobUpload{
-		AccountName:   accountName,
-		AccountKey:    accountKey,
-		ContainerName: cfg.ContainerName,
-	}, nil
-}
-
-func (r *AgentRouteReconciler) resolveGCPConfig(
-	ctx context.Context,
-	namespace string,
-	cfg *sipv1alpha1.GCPConfig,
-) (*livekit.GCPUpload, error) {
-	credentials, err := r.resolveSecretKey(ctx, namespace, cfg.CredentialsRef, "credentials")
-	if err != nil {
-		return nil, fmt.Errorf("resolving GCP credentials: %w", err)
-	}
-
-	return &livekit.GCPUpload{
-		Credentials: credentials,
-		Bucket:      cfg.Bucket,
-	}, nil
-}
-
-func (r *AgentRouteReconciler) resolveAliOSSConfig(
-	ctx context.Context,
-	namespace string,
-	cfg *sipv1alpha1.AliOSSConfig,
-) (*livekit.AliOSSUpload, error) {
-	accessKey, err := r.resolveSecretKey(ctx, namespace, cfg.AccessKeyRef, "access_key")
-	if err != nil {
-		return nil, fmt.Errorf("resolving AliOSS access key: %w", err)
-	}
-
-	secretKey, err := r.resolveSecretKey(ctx, namespace, cfg.SecretKeyRef, "secret")
-	if err != nil {
-		return nil, fmt.Errorf("resolving AliOSS secret: %w", err)
-	}
-
-	return &livekit.AliOSSUpload{
-		AccessKey: accessKey,
-		Secret:    secretKey,
-		Region:    cfg.Region,
-		Endpoint:  cfg.Endpoint,
-		Bucket:    cfg.Bucket,
-	}, nil
+	return config
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -628,11 +321,12 @@ func (r *AgentRouteReconciler) setReadyCondition(
 // ─── Controller setup ────────────────────────────────────────────────────────
 
 // SetupWithManager sets up the controller with the Manager.
-// It watches AgentRoute resources and also watches SIPNumber resources,
-// enqueueing the AgentRoutes that reference any changed SIPNumber.
+// It watches AgentRoute resources, owned SIPDispatchRule resources,
+// and SIPNumber resources (enqueueing AgentRoutes that reference changed SIPNumbers).
 func (r *AgentRouteReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&sipv1alpha1.AgentRoute{}).
+		Owns(&sipv1alpha1.SIPDispatchRule{}).
 		Watches(
 			&sipv1alpha1.SIPNumber{},
 			handler.EnqueueRequestsFromMapFunc(r.findAgentRoutesForSIPNumber),

@@ -68,6 +68,24 @@ spec:
               hidePhoneNumber:
                 description: Hide the caller's phone number from participants.
                 type: boolean
+              individual:
+                description: |-
+                  Configuration for the individual dispatch rule (one room per call).
+                  If not set, defaults to roomPrefix "call-<agentName>-".
+                properties:
+                  noRandomness:
+                    description: If true, don't append a random suffix to the room
+                      name.
+                    type: boolean
+                  pin:
+                    description: Optional PIN required.
+                    type: string
+                  roomPrefix:
+                    description: Prefix for generated room names.
+                    type: string
+                required:
+                - roomPrefix
+                type: object
               krispEnabled:
                 description: Enable Krisp noise cancellation.
                 type: boolean

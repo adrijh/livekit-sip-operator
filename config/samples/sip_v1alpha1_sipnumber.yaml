@@ -6,7 +6,6 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
   name: support-line
 spec:
-  livekitRef:
-    service: livekit-server
-    secretName: livekit-credentials
+  trunkConfigRef:
+    name: twilio
   number: "+15551234567"
