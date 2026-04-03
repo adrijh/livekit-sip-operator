@@ -27,6 +27,13 @@ type SIPNumberReference struct {
 	Name string `json:"name"`
 }
 
+// LivekitAgentReference references a LivekitAgent resource by name (same namespace).
+type LivekitAgentReference struct {
+	// Name of the LivekitAgent resource.
+	// +kubebuilder:validation:Required
+	Name string `json:"name"`
+}
+
 // AgentRouteSpec defines the desired state of AgentRoute.
 // An AgentRoute binds one or more SIPNumbers to an agent by creating
 // a SIP dispatch rule whose trunk_ids list is kept in sync with the
@@ -37,8 +44,15 @@ type AgentRouteSpec struct {
 	LivekitRef LivekitReference `json:"livekitRef"`
 
 	// Name of the agent to dispatch calls to.
-	// +kubebuilder:validation:Required
-	AgentName string `json:"agentName"`
+	// Required if agentRef is not set.
+	// +optional
+	AgentName string `json:"agentName,omitempty"`
+
+	// Reference to a LivekitAgent resource. When set, the agent name is
+	// read from the referenced resource and the route waits for the agent
+	// to be ready before creating the dispatch rule.
+	// +optional
+	AgentRef *LivekitAgentReference `json:"agentRef,omitempty"`
 
 	// References to SIPNumber resources whose trunk IDs should be
 	// included in the dispatch rule.

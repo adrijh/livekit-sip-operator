@@ -301,6 +301,11 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              configHash:
+                description: |-
+                  Hash of the resolved configuration including external references (e.g., EgressConfig).
+                  Used to detect changes in referenced resources whose content is not part of this resource's spec.
+                type: string
               dispatchRuleID:
                 description: The LiveKit dispatch rule ID returned after creation.
                 type: string

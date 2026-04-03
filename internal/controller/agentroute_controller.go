@@ -19,7 +19,6 @@ package controller
 import (
 	"context"
 	"fmt"
-	"slices"
 	"sort"
 
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -53,6 +52,7 @@ type AgentRouteReconciler struct {
 // +kubebuilder:rbac:groups=sip.livekit-sip.io,resources=sipnumbers,verbs=get;list;watch
 // +kubebuilder:rbac:groups=sip.livekit-sip.io,resources=sipdispatchrules,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=sip.livekit-sip.io,resources=egressconfigs,verbs=get;list;watch
+// +kubebuilder:rbac:groups=sip.livekit-sip.io,resources=livekitagents,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 func (r *AgentRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -76,7 +76,28 @@ func (r *AgentRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, nil
 	}
 
-	// ── 3. Collect trunk IDs from referenced SIPNumbers ──────────────────
+	// ── 3. Resolve agent name (inline or from LivekitAgent ref) ─────────
+	agentName, err := r.resolveAgentName(ctx, route)
+	if err != nil {
+		r.setCondition(route, conditionSynced, metav1.ConditionFalse, "AgentResolutionError", err.Error())
+		r.setReadyCondition(route, false, "AgentResolutionError", err.Error())
+		if statusErr := r.Status().Update(ctx, route); statusErr != nil {
+			log.Error(statusErr, "failed to update status after agent resolution error")
+		}
+		return ctrl.Result{RequeueAfter: requeueOnError}, nil
+	}
+
+	if agentName == "" {
+		msg := "Either agentName or agentRef must be set"
+		r.setCondition(route, conditionSynced, metav1.ConditionFalse, "InvalidSpec", msg)
+		r.setReadyCondition(route, false, "InvalidSpec", msg)
+		if statusErr := r.Status().Update(ctx, route); statusErr != nil {
+			log.Error(statusErr, "failed to update status after validation error")
+		}
+		return ctrl.Result{RequeueAfter: requeueOnError}, nil
+	}
+
+	// ── 4. Collect trunk IDs from referenced SIPNumbers ──────────────────
 	trunkIDs, pendingNumbers, err := r.collectTrunkIDs(ctx, route)
 	if err != nil {
 		r.setCondition(route, conditionSynced, metav1.ConditionFalse, "TrunkIDCollectionError", err.Error())
@@ -97,11 +118,11 @@ func (r *AgentRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{RequeueAfter: requeueOnPending}, nil
 	}
 
-	// ── 4. Build the room config for the dispatch rule ───────────────────
-	roomConfig := r.buildRoomConfig(route)
+	// ── 6. Build the room config for the dispatch rule ───────────────────
+	roomConfig := r.buildRoomConfig(route, agentName)
 
-	// ── 5. Create or update the child SIPDispatchRule CR ─────────────────
-	childRule, err := r.reconcileDispatchRule(ctx, route, trunkIDs, roomConfig)
+	// ── 7. Create or update the child SIPDispatchRule CR ─────────────────
+	childRule, err := r.reconcileDispatchRule(ctx, route, agentName, trunkIDs, roomConfig)
 	if err != nil {
 		r.setCondition(route, conditionSynced, metav1.ConditionFalse, "SyncFailed", err.Error())
 		r.setReadyCondition(route, false, "SyncFailed", err.Error())
@@ -111,7 +132,7 @@ func (r *AgentRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{RequeueAfter: requeueOnError}, nil
 	}
 
-	// ── 6. Propagate child status to AgentRoute status ───────────────────
+	// ── 8. Propagate child status to AgentRoute status ───────────────────
 	route.Status.DispatchRuleID = childRule.Status.DispatchRuleID
 	route.Status.TrunkIDs = trunkIDs
 	route.Status.ObservedGeneration = route.Generation
@@ -125,7 +146,7 @@ func (r *AgentRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 			now := metav1.Now()
 			route.Status.LastSyncedAt = &now
 			r.setCondition(route, conditionSynced, metav1.ConditionTrue, "Synced", "SIPDispatchRule is synced")
-			r.setReadyCondition(route, true, "Ready", fmt.Sprintf("Agent %s routed via %d number(s)", route.Spec.AgentName, len(trunkIDs)))
+			r.setReadyCondition(route, true, "Ready", fmt.Sprintf("Agent %s routed via %d number(s)", agentName, len(trunkIDs)))
 		} else {
 			reason := "Pending"
 			msg := "SIPDispatchRule is not yet ready"
@@ -143,6 +164,33 @@ func (r *AgentRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	}
 
 	return ctrl.Result{}, nil
+}
+
+// ─── Agent name resolution ──────────────────────────────────────────────────
+
+// resolveAgentName returns the agent name from either spec.agentName or the
+// referenced LivekitAgent. When agentRef is set, the LivekitAgent must be
+// Ready before the name is returned.
+func (r *AgentRouteReconciler) resolveAgentName(
+	ctx context.Context,
+	route *sipv1alpha1.AgentRoute,
+) (string, error) {
+	if route.Spec.AgentRef != nil {
+		agent := &sipv1alpha1.LivekitAgent{}
+		key := types.NamespacedName{
+			Namespace: route.Namespace,
+			Name:      route.Spec.AgentRef.Name,
+		}
+		if err := r.Get(ctx, key, agent); err != nil {
+			if errors.IsNotFound(err) {
+				return "", fmt.Errorf("LivekitAgent %q not found", route.Spec.AgentRef.Name)
+			}
+			return "", fmt.Errorf("fetching LivekitAgent %q: %w", route.Spec.AgentRef.Name, err)
+		}
+		return agent.Spec.AgentName, nil
+	}
+
+	return route.Spec.AgentName, nil
 }
 
 // ─── Trunk ID collection ─────────────────────────────────────────────────────
@@ -191,6 +239,7 @@ func (r *AgentRouteReconciler) collectTrunkIDs(
 func (r *AgentRouteReconciler) reconcileDispatchRule(
 	ctx context.Context,
 	route *sipv1alpha1.AgentRoute,
+	agentName string,
 	trunkIDs []string,
 	roomConfig *sipv1alpha1.RoomConfig,
 ) (*sipv1alpha1.SIPDispatchRule, error) {
@@ -219,7 +268,7 @@ func (r *AgentRouteReconciler) reconcileDispatchRule(
 		individual := route.Spec.Individual
 		if individual == nil {
 			individual = &sipv1alpha1.SIPDispatchRuleIndividual{
-				RoomPrefix: fmt.Sprintf("call-%s-", route.Spec.AgentName),
+				RoomPrefix: fmt.Sprintf("call-%s-", agentName),
 			}
 		}
 
@@ -259,6 +308,7 @@ func (r *AgentRouteReconciler) reconcileDispatchRule(
 // Otherwise, the primary agent (from agentName) is dispatched automatically.
 func (r *AgentRouteReconciler) buildRoomConfig(
 	route *sipv1alpha1.AgentRoute,
+	agentName string,
 ) *sipv1alpha1.RoomConfig {
 	config := &sipv1alpha1.RoomConfig{}
 
@@ -270,7 +320,7 @@ func (r *AgentRouteReconciler) buildRoomConfig(
 		// No agents specified in roomConfig — auto-dispatch the primary agent
 		config.Agents = []sipv1alpha1.RoomAgentDispatchConfig{
 			{
-				AgentName: route.Spec.AgentName,
+				AgentName: agentName,
 				Metadata:  route.Spec.AgentMetadata,
 			},
 		}
@@ -280,13 +330,6 @@ func (r *AgentRouteReconciler) buildRoomConfig(
 	}
 
 	return config
-}
-
-// ─── Helpers ─────────────────────────────────────────────────────────────────
-
-// trunkIDsEqual compares two sorted trunk ID slices.
-func trunkIDsEqual(a, b []string) bool {
-	return slices.Equal(a, b)
 }
 
 // ─── Condition helpers ───────────────────────────────────────────────────────
@@ -331,6 +374,10 @@ func (r *AgentRouteReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			&sipv1alpha1.SIPNumber{},
 			handler.EnqueueRequestsFromMapFunc(r.findAgentRoutesForSIPNumber),
 		).
+		Watches(
+			&sipv1alpha1.LivekitAgent{},
+			handler.EnqueueRequestsFromMapFunc(r.findAgentRoutesForLivekitAgent),
+		).
 		Named("agentroute").
 		Complete(r)
 }
@@ -365,6 +412,38 @@ func (r *AgentRouteReconciler) findAgentRoutesForSIPNumber(
 				})
 				break
 			}
+		}
+	}
+
+	return requests
+}
+
+// findAgentRoutesForLivekitAgent returns reconcile requests for all AgentRoutes
+// that reference the given LivekitAgent via agentRef.
+func (r *AgentRouteReconciler) findAgentRoutesForLivekitAgent(
+	ctx context.Context,
+	obj client.Object,
+) []reconcile.Request {
+	agent, ok := obj.(*sipv1alpha1.LivekitAgent)
+	if !ok {
+		return nil
+	}
+
+	routeList := &sipv1alpha1.AgentRouteList{}
+	if err := r.List(ctx, routeList, client.InNamespace(agent.Namespace)); err != nil {
+		logf.FromContext(ctx).Error(err, "failed to list AgentRoutes for LivekitAgent watch")
+		return nil
+	}
+
+	var requests []reconcile.Request
+	for _, route := range routeList.Items {
+		if route.Spec.AgentRef != nil && route.Spec.AgentRef.Name == agent.Name {
+			requests = append(requests, reconcile.Request{
+				NamespacedName: types.NamespacedName{
+					Name:      route.Name,
+					Namespace: route.Namespace,
+				},
+			})
 		}
 	}
 

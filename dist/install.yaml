@@ -71,8 +71,22 @@ spec:
                 description: Metadata to pass to the dispatched agent.
                 type: string
               agentName:
-                description: Name of the agent to dispatch calls to.
+                description: |-
+                  Name of the agent to dispatch calls to.
+                  Required if agentRef is not set.
                 type: string
+              agentRef:
+                description: |-
+                  Reference to a LivekitAgent resource. When set, the agent name is
+                  read from the referenced resource and the route waits for the agent
+                  to be ready before creating the dispatch rule.
+                properties:
+                  name:
+                    description: Name of the LivekitAgent resource.
+                    type: string
+                required:
+                - name
+                type: object
               hidePhoneNumber:
                 description: Hide the caller's phone number from participants.
                 type: boolean
@@ -206,7 +220,6 @@ spec:
                     type: object
                 type: object
             required:
-            - agentName
             - livekitRef
             - numberRefs
             type: object
@@ -827,6 +840,11 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              configHash:
+                description: |-
+                  Hash of the resolved configuration including external references (e.g., EgressConfig).
+                  Used to detect changes in referenced resources whose content is not part of this resource's spec.
+                type: string
               dispatchRuleID:
                 description: The LiveKit dispatch rule ID returned after creation.
                 type: string
@@ -1869,9 +1887,18 @@ rules:
   - list
   - watch
 - apiGroups:
+  - apps
+  resources:
+  - deployments
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
   - sip.livekit-sip.io
   resources:
   - agentroutes
+  - livekitagents
   - sipdispatchrules
   - sipinboundtrunks
   - sipnumbers
@@ -1888,6 +1915,7 @@ rules:
   - sip.livekit-sip.io
   resources:
   - agentroutes/finalizers
+  - livekitagents/finalizers
   - sipdispatchrules/finalizers
   - sipinboundtrunks/finalizers
   - sipnumbers/finalizers
@@ -1898,6 +1926,7 @@ rules:
   - sip.livekit-sip.io
   resources:
   - agentroutes/status
+  - livekitagents/status
   - sipdispatchrules/status
   - sipinboundtrunks/status
   - sipnumbers/status
@@ -2394,7 +2423,7 @@ spec:
         - --health-probe-bind-address=:8081
         command:
         - /manager
-        image: docker.io/adrianjh/livekit-sip-operator:v0.0.2
+        image: docker.io/adrianjh/livekit-sip-operator:v0.0.4-dev1
         imagePullPolicy: IfNotPresent
         livenessProbe:
           httpGet:

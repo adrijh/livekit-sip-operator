@@ -18,10 +18,13 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 
 	"github.com/livekit/protocol/livekit"
 	lksdk "github.com/livekit/server-sdk-go/v2"
+	"google.golang.org/protobuf/proto"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -31,7 +34,9 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	sipv1alpha1 "github.com/adrijh/livekit-sip-operator/api/v1alpha1"
 )
@@ -102,11 +107,14 @@ func (r *SIPDispatchRuleReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		}
 	}
 
-	// ── 6. Create or Update the dispatch rule in LiveKit ─────────────────
+	// ── 6. Compute config hash to detect changes in external references ──
+	configHash := computeConfigHash(roomConfig)
+
+	// ── 7. Create or Update the dispatch rule in LiveKit ─────────────────
 	if rule.Status.DispatchRuleID == "" {
-		return r.reconcileCreate(ctx, rule, sipClient, roomConfig)
+		return r.reconcileCreate(ctx, rule, sipClient, roomConfig, configHash)
 	}
-	return r.reconcileUpdate(ctx, rule, sipClient, roomConfig)
+	return r.reconcileUpdate(ctx, rule, sipClient, roomConfig, configHash)
 }
 
 // ─── Reconcile sub-routines ──────────────────────────────────────────────────
@@ -116,6 +124,7 @@ func (r *SIPDispatchRuleReconciler) reconcileCreate(
 	rule *sipv1alpha1.SIPDispatchRule,
 	sipClient *lksdk.SIPClient,
 	roomConfig *livekit.RoomConfiguration,
+	configHash string,
 ) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 	log.Info("Creating SIP dispatch rule in LiveKit", "name", rule.Spec.Name)
@@ -139,6 +148,7 @@ func (r *SIPDispatchRuleReconciler) reconcileCreate(
 
 	rule.Status.DispatchRuleID = info.SipDispatchRuleId
 	rule.Status.ObservedGeneration = rule.Generation
+	rule.Status.ConfigHash = configHash
 	now := metav1.Now()
 	rule.Status.LastSyncedAt = &now
 
@@ -158,10 +168,12 @@ func (r *SIPDispatchRuleReconciler) reconcileUpdate(
 	rule *sipv1alpha1.SIPDispatchRule,
 	sipClient *lksdk.SIPClient,
 	roomConfig *livekit.RoomConfiguration,
+	configHash string,
 ) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
-	if rule.Status.ObservedGeneration == rule.Generation {
+	// Skip if neither the spec (generation) nor external config (hash) changed.
+	if rule.Status.ObservedGeneration == rule.Generation && rule.Status.ConfigHash == configHash {
 		return ctrl.Result{}, nil
 	}
 
@@ -187,6 +199,7 @@ func (r *SIPDispatchRuleReconciler) reconcileUpdate(
 	}
 
 	rule.Status.ObservedGeneration = rule.Generation
+	rule.Status.ConfigHash = configHash
 	now := metav1.Now()
 	rule.Status.LastSyncedAt = &now
 
@@ -574,9 +587,74 @@ func (r *SIPDispatchRuleReconciler) setReadyCondition(
 
 // ─── Controller setup ────────────────────────────────────────────────────────
 
+// computeConfigHash returns a hash of the resolved room configuration,
+// including content from external references like EgressConfig.
+// This allows detecting changes in referenced resources that don't
+// bump the SIPDispatchRule's own generation.
+func computeConfigHash(roomConfig *livekit.RoomConfiguration) string {
+	if roomConfig == nil {
+		return ""
+	}
+	data, err := proto.Marshal(roomConfig)
+	if err != nil {
+		return ""
+	}
+	hash := sha256.Sum256(data)
+	return hex.EncodeToString(hash[:])
+}
+
 func (r *SIPDispatchRuleReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&sipv1alpha1.SIPDispatchRule{}).
+		Watches(
+			&sipv1alpha1.EgressConfig{},
+			handler.EnqueueRequestsFromMapFunc(r.findDispatchRulesForEgressConfig),
+		).
 		Named("sipdispatchrule").
 		Complete(r)
+}
+
+// findDispatchRulesForEgressConfig returns reconcile requests for all SIPDispatchRules
+// that reference the given EgressConfig in their room egress configuration.
+func (r *SIPDispatchRuleReconciler) findDispatchRulesForEgressConfig(
+	ctx context.Context,
+	obj client.Object,
+) []reconcile.Request {
+	egressConfig, ok := obj.(*sipv1alpha1.EgressConfig)
+	if !ok {
+		return nil
+	}
+
+	ruleList := &sipv1alpha1.SIPDispatchRuleList{}
+	if err := r.List(ctx, ruleList, client.InNamespace(egressConfig.Namespace)); err != nil {
+		logf.FromContext(ctx).Error(err, "failed to list SIPDispatchRules for EgressConfig watch")
+		return nil
+	}
+
+	var requests []reconcile.Request
+	for _, rule := range ruleList.Items {
+		if referencesEgressConfig(rule.Spec.RoomConfig, egressConfig.Name) {
+			requests = append(requests, reconcile.Request{
+				NamespacedName: types.NamespacedName{
+					Name:      rule.Name,
+					Namespace: rule.Namespace,
+				},
+			})
+		}
+	}
+
+	return requests
+}
+
+// referencesEgressConfig checks whether a RoomConfig references the named EgressConfig.
+func referencesEgressConfig(rc *sipv1alpha1.RoomConfig, name string) bool {
+	if rc == nil || rc.Egress == nil || rc.Egress.Room == nil {
+		return false
+	}
+	for _, fo := range rc.Egress.Room.FileOutputs {
+		if fo.EgressConfigRef.Name == name {
+			return true
+		}
+	}
+	return false
 }

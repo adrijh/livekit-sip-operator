@@ -28,7 +28,9 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	sipv1alpha1 "github.com/adrijh/livekit-sip-operator/api/v1alpha1"
 )
@@ -289,12 +291,48 @@ func (r *SIPNumberReconciler) setReadyCondition(
 // ─── Controller setup ────────────────────────────────────────────────────────
 
 // SetupWithManager sets up the controller with the Manager.
-// It watches SIPNumber resources and also watches owned SIPInboundTrunk
-// resources to propagate their status back to the parent SIPNumber.
+// It watches SIPNumber resources, owned SIPInboundTrunk resources,
+// and SIPTrunkConfig resources (enqueueing SIPNumbers that reference changed configs).
 func (r *SIPNumberReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&sipv1alpha1.SIPNumber{}).
 		Owns(&sipv1alpha1.SIPInboundTrunk{}).
+		Watches(
+			&sipv1alpha1.SIPTrunkConfig{},
+			handler.EnqueueRequestsFromMapFunc(r.findSIPNumbersForTrunkConfig),
+		).
 		Named("sipnumber").
 		Complete(r)
+}
+
+// findSIPNumbersForTrunkConfig returns reconcile requests for all SIPNumbers
+// that reference the given SIPTrunkConfig.
+func (r *SIPNumberReconciler) findSIPNumbersForTrunkConfig(
+	ctx context.Context,
+	obj client.Object,
+) []reconcile.Request {
+	trunkConfig, ok := obj.(*sipv1alpha1.SIPTrunkConfig)
+	if !ok {
+		return nil
+	}
+
+	numberList := &sipv1alpha1.SIPNumberList{}
+	if err := r.List(ctx, numberList, client.InNamespace(trunkConfig.Namespace)); err != nil {
+		logf.FromContext(ctx).Error(err, "failed to list SIPNumbers for SIPTrunkConfig watch")
+		return nil
+	}
+
+	var requests []reconcile.Request
+	for _, number := range numberList.Items {
+		if number.Spec.TrunkConfigRef != nil && number.Spec.TrunkConfigRef.Name == trunkConfig.Name {
+			requests = append(requests, reconcile.Request{
+				NamespacedName: types.NamespacedName{
+					Name:      number.Name,
+					Namespace: number.Namespace,
+				},
+			})
+		}
+	}
+
+	return requests
 }

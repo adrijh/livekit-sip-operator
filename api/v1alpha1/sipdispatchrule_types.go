@@ -230,6 +230,11 @@ type SIPDispatchRuleStatus struct {
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
+	// Hash of the resolved configuration including external references (e.g., EgressConfig).
+	// Used to detect changes in referenced resources whose content is not part of this resource's spec.
+	// +optional
+	ConfigHash string `json:"configHash,omitempty"`
+
 	// Standard conditions for the resource.
 	// +optional
 	// +listType=map

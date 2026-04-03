@@ -31,9 +31,18 @@ rules:
   - list
   - watch
 - apiGroups:
+  - apps
+  resources:
+  - deployments
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
   - sip.livekit-sip.io
   resources:
   - agentroutes
+  - livekitagents
   - sipdispatchrules
   - sipinboundtrunks
   - sipnumbers
@@ -50,6 +59,7 @@ rules:
   - sip.livekit-sip.io
   resources:
   - agentroutes/finalizers
+  - livekitagents/finalizers
   - sipdispatchrules/finalizers
   - sipinboundtrunks/finalizers
   - sipnumbers/finalizers
@@ -60,6 +70,7 @@ rules:
   - sip.livekit-sip.io
   resources:
   - agentroutes/status
+  - livekitagents/status
   - sipdispatchrules/status
   - sipinboundtrunks/status
   - sipnumbers/status

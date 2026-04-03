@@ -63,8 +63,22 @@ spec:
                 description: Metadata to pass to the dispatched agent.
                 type: string
               agentName:
-                description: Name of the agent to dispatch calls to.
+                description: |-
+                  Name of the agent to dispatch calls to.
+                  Required if agentRef is not set.
                 type: string
+              agentRef:
+                description: |-
+                  Reference to a LivekitAgent resource. When set, the agent name is
+                  read from the referenced resource and the route waits for the agent
+                  to be ready before creating the dispatch rule.
+                properties:
+                  name:
+                    description: Name of the LivekitAgent resource.
+                    type: string
+                required:
+                - name
+                type: object
               hidePhoneNumber:
                 description: Hide the caller's phone number from participants.
                 type: boolean
@@ -198,7 +212,6 @@ spec:
                     type: object
                 type: object
             required:
-            - agentName
             - livekitRef
             - numberRefs
             type: object
