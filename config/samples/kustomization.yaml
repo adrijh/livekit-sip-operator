@@ -7,4 +7,5 @@ resources:
 - sip_v1alpha1_sipnumber.yaml
 - sip_v1alpha1_agentroute.yaml
 - sip_v1alpha1_siptrunkconfig.yaml
+- sip_v1alpha1_livekitagent.yaml
 # +kubebuilder:scaffold:manifestskustomizesamples

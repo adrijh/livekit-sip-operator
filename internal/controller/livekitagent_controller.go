@@ -128,7 +128,7 @@ func (r *LivekitAgentReconciler) getDeploymentStatus(
 	dep := &appsv1.Deployment{}
 	if err := r.Get(ctx, key, dep); err != nil {
 		if errors.IsNotFound(err) {
-			return 0, 0, fmt.Errorf("Deployment %q not found", ref.Name)
+			return 0, 0, fmt.Errorf("deployment %q not found", ref.Name)
 		}
 		return 0, 0, fmt.Errorf("fetching Deployment %q: %w", ref.Name, err)
 	}
