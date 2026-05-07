@@ -38,9 +38,8 @@ type SIPNumberSpec struct {
 	// +optional
 	LivekitRef *LivekitReference `json:"livekitRef,omitempty"`
 
-	// The phone number (DID) in E.164 format (e.g. "+15551234567").
+	// The phone number (DID), e.g. "+15551234567".
 	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:Pattern=`^\+[1-9]\d{1,14}$`
 	Number string `json:"number"`
 
 	// Reference to a Secret containing SIP auth credentials (keys: username, password).

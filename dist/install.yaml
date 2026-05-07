@@ -1224,8 +1224,7 @@ spec:
                 - require
                 type: string
               number:
-                description: The phone number (DID) in E.164 format (e.g. "+15551234567").
-                pattern: ^\+[1-9]\d{1,14}$
+                description: The phone number (DID), e.g. "+15551234567".
                 type: string
               ringingTimeout:
                 description: |-
