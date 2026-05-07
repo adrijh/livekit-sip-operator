@@ -2423,7 +2423,7 @@ spec:
         - --health-probe-bind-address=:8081
         command:
         - /manager
-        image: docker.io/adrianjh/livekit-sip-operator:v0.0.4-dev1
+        image: docker.io/adrianjh/livekit-sip-operator:v0.0.141
         imagePullPolicy: IfNotPresent
         livenessProbe:
           httpGet:
