@@ -84,10 +84,8 @@ spec:
                     - name
                     type: object
                 required:
-                - accessKeyRef
                 - bucket
                 - region
-                - secretKeyRef
                 type: object
               azure:
                 description: Azure Blob Storage configuration.
@@ -124,8 +122,6 @@ spec:
                     description: Azure storage container name.
                     type: string
                 required:
-                - accountKeyRef
-                - accountNameRef
                 - containerName
                 type: object
               gcp:
@@ -150,7 +146,6 @@ spec:
                     type: object
                 required:
                 - bucket
-                - credentialsRef
                 type: object
               s3:
                 description: S3-compatible storage configuration.
@@ -210,10 +205,8 @@ spec:
                     - name
                     type: object
                 required:
-                - accessKeyRef
                 - bucket
                 - region
-                - secretKeyRef
                 type: object
             type: object
           status:

@@ -395,6 +395,9 @@ func (r *SIPDispatchRuleReconciler) buildEncodedFileOutput(
 		Filepath: fo.Filepath,
 	}
 
+	// A nil upload value means "no credentials provided" — leave the EncodedFileOutput.Output
+	// oneof unset so the egress worker uses its own server-level `storage:` block.
+	// See https://github.com/livekit/egress/blob/main/pkg/config/storage.go (getStorageConfig fallback).
 	spec := egressConfig.Spec
 	switch {
 	case spec.S3 != nil:
@@ -402,28 +405,36 @@ func (r *SIPDispatchRuleReconciler) buildEncodedFileOutput(
 		if err != nil {
 			return nil, err
 		}
-		output.Output = &livekit.EncodedFileOutput_S3{S3: s3Upload}
+		if s3Upload != nil {
+			output.Output = &livekit.EncodedFileOutput_S3{S3: s3Upload}
+		}
 
 	case spec.Azure != nil:
 		azureUpload, err := r.resolveAzureConfig(ctx, namespace, spec.Azure)
 		if err != nil {
 			return nil, err
 		}
-		output.Output = &livekit.EncodedFileOutput_Azure{Azure: azureUpload}
+		if azureUpload != nil {
+			output.Output = &livekit.EncodedFileOutput_Azure{Azure: azureUpload}
+		}
 
 	case spec.GCP != nil:
 		gcpUpload, err := r.resolveGCPConfig(ctx, namespace, spec.GCP)
 		if err != nil {
 			return nil, err
 		}
-		output.Output = &livekit.EncodedFileOutput_Gcp{Gcp: gcpUpload}
+		if gcpUpload != nil {
+			output.Output = &livekit.EncodedFileOutput_Gcp{Gcp: gcpUpload}
+		}
 
 	case spec.AliOSS != nil:
 		aliUpload, err := r.resolveAliOSSConfig(ctx, namespace, spec.AliOSS)
 		if err != nil {
 			return nil, err
 		}
-		output.Output = &livekit.EncodedFileOutput_AliOSS{AliOSS: aliUpload}
+		if aliUpload != nil {
+			output.Output = &livekit.EncodedFileOutput_AliOSS{AliOSS: aliUpload}
+		}
 
 	default:
 		return nil, fmt.Errorf("EgressConfig %q has no storage backend configured", egressConfig.Name)
@@ -459,17 +470,27 @@ func (r *SIPDispatchRuleReconciler) resolveSecretKey(
 	return string(val), nil
 }
 
+// resolveS3Config returns nil when no credential refs are provided, signalling
+// the caller to omit the S3 block from the egress proto and rely on the egress
+// worker's server-level `storage:` block. Partial credential refs are rejected.
 func (r *SIPDispatchRuleReconciler) resolveS3Config(
 	ctx context.Context,
 	namespace string,
 	cfg *sipv1alpha1.S3Config,
 ) (*livekit.S3Upload, error) {
-	accessKey, err := r.resolveSecretKey(ctx, namespace, cfg.AccessKeyRef, "access_key")
+	switch {
+	case cfg.AccessKeyRef == nil && cfg.SecretKeyRef == nil:
+		return nil, nil
+	case cfg.AccessKeyRef == nil || cfg.SecretKeyRef == nil:
+		return nil, fmt.Errorf("S3: accessKeyRef and secretKeyRef must be set together, or both omitted")
+	}
+
+	accessKey, err := r.resolveSecretKey(ctx, namespace, *cfg.AccessKeyRef, "access_key")
 	if err != nil {
 		return nil, fmt.Errorf("resolving S3 access key: %w", err)
 	}
 
-	secretKey, err := r.resolveSecretKey(ctx, namespace, cfg.SecretKeyRef, "secret")
+	secretKey, err := r.resolveSecretKey(ctx, namespace, *cfg.SecretKeyRef, "secret")
 	if err != nil {
 		return nil, fmt.Errorf("resolving S3 secret: %w", err)
 	}
@@ -494,17 +515,27 @@ func (r *SIPDispatchRuleReconciler) resolveS3Config(
 	return upload, nil
 }
 
+// resolveAzureConfig returns nil when no credential refs are provided, signalling
+// the caller to omit the Azure block from the egress proto and rely on the egress
+// worker's server-level `storage:` block. Partial credential refs are rejected.
 func (r *SIPDispatchRuleReconciler) resolveAzureConfig(
 	ctx context.Context,
 	namespace string,
 	cfg *sipv1alpha1.AzureConfig,
 ) (*livekit.AzureBlobUpload, error) {
-	accountName, err := r.resolveSecretKey(ctx, namespace, cfg.AccountNameRef, "account_name")
+	switch {
+	case cfg.AccountNameRef == nil && cfg.AccountKeyRef == nil:
+		return nil, nil
+	case cfg.AccountNameRef == nil || cfg.AccountKeyRef == nil:
+		return nil, fmt.Errorf("Azure: accountNameRef and accountKeyRef must be set together, or both omitted")
+	}
+
+	accountName, err := r.resolveSecretKey(ctx, namespace, *cfg.AccountNameRef, "account_name")
 	if err != nil {
 		return nil, fmt.Errorf("resolving Azure account name: %w", err)
 	}
 
-	accountKey, err := r.resolveSecretKey(ctx, namespace, cfg.AccountKeyRef, "account_key")
+	accountKey, err := r.resolveSecretKey(ctx, namespace, *cfg.AccountKeyRef, "account_key")
 	if err != nil {
 		return nil, fmt.Errorf("resolving Azure account key: %w", err)
 	}
@@ -516,12 +547,19 @@ func (r *SIPDispatchRuleReconciler) resolveAzureConfig(
 	}, nil
 }
 
+// resolveGCPConfig returns nil when CredentialsRef is omitted, signalling the
+// caller to leave the GCP block out of the egress proto and rely on the egress
+// worker's server-level `storage:` block.
 func (r *SIPDispatchRuleReconciler) resolveGCPConfig(
 	ctx context.Context,
 	namespace string,
 	cfg *sipv1alpha1.GCPConfig,
 ) (*livekit.GCPUpload, error) {
-	credentials, err := r.resolveSecretKey(ctx, namespace, cfg.CredentialsRef, "credentials")
+	if cfg.CredentialsRef == nil {
+		return nil, nil
+	}
+
+	credentials, err := r.resolveSecretKey(ctx, namespace, *cfg.CredentialsRef, "credentials")
 	if err != nil {
 		return nil, fmt.Errorf("resolving GCP credentials: %w", err)
 	}
@@ -532,17 +570,27 @@ func (r *SIPDispatchRuleReconciler) resolveGCPConfig(
 	}, nil
 }
 
+// resolveAliOSSConfig returns nil when no credential refs are provided, signalling
+// the caller to omit the AliOSS block from the egress proto and rely on the egress
+// worker's server-level `storage:` block. Partial credential refs are rejected.
 func (r *SIPDispatchRuleReconciler) resolveAliOSSConfig(
 	ctx context.Context,
 	namespace string,
 	cfg *sipv1alpha1.AliOSSConfig,
 ) (*livekit.AliOSSUpload, error) {
-	accessKey, err := r.resolveSecretKey(ctx, namespace, cfg.AccessKeyRef, "access_key")
+	switch {
+	case cfg.AccessKeyRef == nil && cfg.SecretKeyRef == nil:
+		return nil, nil
+	case cfg.AccessKeyRef == nil || cfg.SecretKeyRef == nil:
+		return nil, fmt.Errorf("AliOSS: accessKeyRef and secretKeyRef must be set together, or both omitted")
+	}
+
+	accessKey, err := r.resolveSecretKey(ctx, namespace, *cfg.AccessKeyRef, "access_key")
 	if err != nil {
 		return nil, fmt.Errorf("resolving AliOSS access key: %w", err)
 	}
 
-	secretKey, err := r.resolveSecretKey(ctx, namespace, cfg.SecretKeyRef, "secret")
+	secretKey, err := r.resolveSecretKey(ctx, namespace, *cfg.SecretKeyRef, "secret")
 	if err != nil {
 		return nil, fmt.Errorf("resolving AliOSS secret: %w", err)
 	}

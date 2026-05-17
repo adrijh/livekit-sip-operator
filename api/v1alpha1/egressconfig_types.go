@@ -32,6 +32,11 @@ type SecretKeySelector struct {
 }
 
 // S3Config defines S3-compatible storage configuration.
+//
+// Credentials are optional. When the credential refs are omitted, the operator
+// will not include any S3 fields in the egress request and the LiveKit Egress
+// worker will use the credentials configured in its own `storage:` block.
+// When the refs are provided, both AccessKeyRef and SecretKeyRef must be set.
 type S3Config struct {
 	// AWS region.
 	// +kubebuilder:validation:Required
@@ -50,12 +55,12 @@ type S3Config struct {
 	ForcePathStyle bool `json:"forcePathStyle,omitempty"`
 
 	// Reference to a Secret and key for the access key. Default key: "access_key".
-	// +kubebuilder:validation:Required
-	AccessKeyRef SecretKeySelector `json:"accessKeyRef"`
+	// +optional
+	AccessKeyRef *SecretKeySelector `json:"accessKeyRef,omitempty"`
 
 	// Reference to a Secret and key for the secret key. Default key: "secret".
-	// +kubebuilder:validation:Required
-	SecretKeyRef SecretKeySelector `json:"secretKeyRef"`
+	// +optional
+	SecretKeyRef *SecretKeySelector `json:"secretKeyRef,omitempty"`
 
 	// Reference to a Secret and key for an optional session token. Default key: "session_token".
 	// +optional
@@ -63,32 +68,46 @@ type S3Config struct {
 }
 
 // AzureConfig defines Azure Blob Storage configuration.
+//
+// Credentials are optional. When the credential refs are omitted, the operator
+// will not include any Azure fields in the egress request and the LiveKit Egress
+// worker will use the credentials configured in its own `storage:` block.
+// When the refs are provided, both AccountNameRef and AccountKeyRef must be set.
 type AzureConfig struct {
 	// Azure storage container name.
 	// +kubebuilder:validation:Required
 	ContainerName string `json:"containerName"`
 
 	// Reference to a Secret and key for the account name. Default key: "account_name".
-	// +kubebuilder:validation:Required
-	AccountNameRef SecretKeySelector `json:"accountNameRef"`
+	// +optional
+	AccountNameRef *SecretKeySelector `json:"accountNameRef,omitempty"`
 
 	// Reference to a Secret and key for the account key. Default key: "account_key".
-	// +kubebuilder:validation:Required
-	AccountKeyRef SecretKeySelector `json:"accountKeyRef"`
+	// +optional
+	AccountKeyRef *SecretKeySelector `json:"accountKeyRef,omitempty"`
 }
 
 // GCPConfig defines Google Cloud Storage configuration.
+//
+// Credentials are optional. When CredentialsRef is omitted, the operator will
+// not include any GCP fields in the egress request and the LiveKit Egress
+// worker will use the credentials configured in its own `storage:` block.
 type GCPConfig struct {
 	// GCS bucket name.
 	// +kubebuilder:validation:Required
 	Bucket string `json:"bucket"`
 
 	// Reference to a Secret and key for the service account JSON credentials. Default key: "credentials".
-	// +kubebuilder:validation:Required
-	CredentialsRef SecretKeySelector `json:"credentialsRef"`
+	// +optional
+	CredentialsRef *SecretKeySelector `json:"credentialsRef,omitempty"`
 }
 
 // AliOSSConfig defines Alibaba Cloud OSS configuration.
+//
+// Credentials are optional. When the credential refs are omitted, the operator
+// will not include any AliOSS fields in the egress request and the LiveKit
+// Egress worker will use the credentials configured in its own `storage:` block.
+// When the refs are provided, both AccessKeyRef and SecretKeyRef must be set.
 type AliOSSConfig struct {
 	// OSS region.
 	// +kubebuilder:validation:Required
@@ -103,12 +122,12 @@ type AliOSSConfig struct {
 	Bucket string `json:"bucket"`
 
 	// Reference to a Secret and key for the access key. Default key: "access_key".
-	// +kubebuilder:validation:Required
-	AccessKeyRef SecretKeySelector `json:"accessKeyRef"`
+	// +optional
+	AccessKeyRef *SecretKeySelector `json:"accessKeyRef,omitempty"`
 
 	// Reference to a Secret and key for the secret key. Default key: "secret".
-	// +kubebuilder:validation:Required
-	SecretKeyRef SecretKeySelector `json:"secretKeyRef"`
+	// +optional
+	SecretKeyRef *SecretKeySelector `json:"secretKeyRef,omitempty"`
 }
 
 // EgressConfigSpec defines a reusable egress storage backend configuration.

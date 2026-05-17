@@ -144,6 +144,20 @@ spec:
       name: minio-credentials
 ```
 
+Credential refs are optional. If you omit them, the operator leaves the storage block out of the egress request and the LiveKit Egress worker uses the credentials configured in its own `storage:` block. This avoids embedding sensitive credentials in the dispatch rule's `RoomConfig`, which is required for long-running calls that hit the token-refresh path:
+
+```yaml
+apiVersion: sip.livekit-sip.io/v1alpha1
+kind: EgressConfig
+metadata:
+  name: azure-sessions-egress
+spec:
+  azure:
+    containerName: sessions
+    # accountNameRef / accountKeyRef omitted — the egress worker's own
+    # `storage.azure.{account_name,account_key,container_name}` is used.
+```
+
 Then reference it from a dispatch rule:
 
 ```yaml
