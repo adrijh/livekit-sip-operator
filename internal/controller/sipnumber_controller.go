@@ -134,6 +134,9 @@ func (r *SIPNumberReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	}
 
 	if err := r.Status().Update(ctx, number); err != nil {
+		if errors.IsConflict(err) {
+			return ctrl.Result{Requeue: true}, nil
+		}
 		return ctrl.Result{}, fmt.Errorf("updating SIPNumber status: %w", err)
 	}
 

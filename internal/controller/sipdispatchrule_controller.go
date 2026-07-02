@@ -127,6 +127,32 @@ func (r *SIPDispatchRuleReconciler) reconcileCreate(
 	configHash string,
 ) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
+
+	// A stale informer cache or a failed status write can re-enter the create
+	// path after the rule already exists in LiveKit, so adopt a same-named
+	// rule instead of creating a duplicate.
+	existing, err := findDispatchRuleByName(ctx, sipClient, rule.Spec.Name)
+	if err != nil {
+		r.setCondition(rule, conditionSynced, metav1.ConditionFalse, "ListFailed", err.Error())
+		r.setReadyCondition(rule, false, "ListFailed", err.Error())
+		if statusErr := r.Status().Update(ctx, rule); statusErr != nil {
+			log.Error(statusErr, "failed to update status after list error")
+		}
+		return ctrl.Result{RequeueAfter: requeueOnError}, fmt.Errorf("listing dispatch rules in LiveKit: %w", err)
+	}
+	if existing != nil {
+		log.Info("Adopting existing SIP dispatch rule", "ruleID", existing.SipDispatchRuleId)
+		rule.Status.DispatchRuleID = existing.SipDispatchRuleId
+		if err := r.Status().Update(ctx, rule); err != nil {
+			if errors.IsConflict(err) {
+				return ctrl.Result{Requeue: true}, nil
+			}
+			return ctrl.Result{}, fmt.Errorf("updating status after adopt: %w", err)
+		}
+		// Requeue so reconcileUpdate syncs the spec onto the adopted rule.
+		return ctrl.Result{Requeue: true}, nil
+	}
+
 	log.Info("Creating SIP dispatch rule in LiveKit", "name", rule.Spec.Name)
 
 	ruleInfo := r.buildRuleInfo(rule)
@@ -156,6 +182,11 @@ func (r *SIPDispatchRuleReconciler) reconcileCreate(
 	r.setReadyCondition(rule, true, "Ready", "Dispatch rule is active")
 
 	if err := r.Status().Update(ctx, rule); err != nil {
+		if errors.IsConflict(err) {
+			// The rule exists in LiveKit; requeue and let the adoption
+			// lookup pick it up instead of failing the reconcile.
+			return ctrl.Result{Requeue: true}, nil
+		}
 		return ctrl.Result{}, fmt.Errorf("updating status after create: %w", err)
 	}
 
@@ -207,6 +238,9 @@ func (r *SIPDispatchRuleReconciler) reconcileUpdate(
 	r.setReadyCondition(rule, true, "Ready", "Dispatch rule is active")
 
 	if err := r.Status().Update(ctx, rule); err != nil {
+		if errors.IsConflict(err) {
+			return ctrl.Result{Requeue: true}, nil
+		}
 		return ctrl.Result{}, fmt.Errorf("updating status after update: %w", err)
 	}
 
@@ -246,6 +280,23 @@ func (r *SIPDispatchRuleReconciler) reconcileDelete(
 
 	log.Info("SIP dispatch rule deleted", "name", rule.Name)
 	return ctrl.Result{}, nil
+}
+
+func findDispatchRuleByName(
+	ctx context.Context,
+	sipClient *lksdk.SIPClient,
+	name string,
+) (*livekit.SIPDispatchRuleInfo, error) {
+	resp, err := sipClient.ListSIPDispatchRule(ctx, &livekit.ListSIPDispatchRuleRequest{})
+	if err != nil {
+		return nil, err
+	}
+	for _, dr := range resp.Items {
+		if dr != nil && dr.Name == name {
+			return dr, nil
+		}
+	}
+	return nil, nil
 }
 
 // ─── LiveKit request builders ────────────────────────────────────────────────

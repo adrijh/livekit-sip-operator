@@ -116,6 +116,32 @@ func (r *SIPInboundTrunkReconciler) reconcileCreate(
 	authUser, authPass string,
 ) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
+
+	// A stale informer cache or a failed status write can re-enter the create
+	// path after the trunk already exists in LiveKit, so adopt a same-named
+	// trunk instead of creating a duplicate.
+	existing, err := findInboundTrunkByName(ctx, sipClient, trunk.Spec.Name)
+	if err != nil {
+		r.setCondition(trunk, conditionSynced, metav1.ConditionFalse, "ListFailed", err.Error())
+		r.setReadyCondition(trunk, false, "ListFailed", err.Error())
+		if statusErr := r.Status().Update(ctx, trunk); statusErr != nil {
+			log.Error(statusErr, "failed to update status after list error")
+		}
+		return ctrl.Result{RequeueAfter: requeueOnError}, fmt.Errorf("listing trunks in LiveKit: %w", err)
+	}
+	if existing != nil {
+		log.Info("Adopting existing SIP inbound trunk", "trunkID", existing.SipTrunkId)
+		trunk.Status.TrunkID = existing.SipTrunkId
+		if err := r.Status().Update(ctx, trunk); err != nil {
+			if errors.IsConflict(err) {
+				return ctrl.Result{Requeue: true}, nil
+			}
+			return ctrl.Result{}, fmt.Errorf("updating status after adopt: %w", err)
+		}
+		// Requeue so reconcileUpdate syncs the spec onto the adopted trunk.
+		return ctrl.Result{Requeue: true}, nil
+	}
+
 	log.Info("Creating SIP inbound trunk in LiveKit", "name", trunk.Spec.Name)
 
 	req := &livekit.CreateSIPInboundTrunkRequest{
@@ -141,6 +167,11 @@ func (r *SIPInboundTrunkReconciler) reconcileCreate(
 	r.setReadyCondition(trunk, true, "Ready", "Trunk is active")
 
 	if err := r.Status().Update(ctx, trunk); err != nil {
+		if errors.IsConflict(err) {
+			// The trunk exists in LiveKit; requeue and let the adoption
+			// lookup pick it up instead of failing the reconcile.
+			return ctrl.Result{Requeue: true}, nil
+		}
 		return ctrl.Result{}, fmt.Errorf("updating status after create: %w", err)
 	}
 
@@ -188,6 +219,9 @@ func (r *SIPInboundTrunkReconciler) reconcileUpdate(
 	r.setReadyCondition(trunk, true, "Ready", "Trunk is active")
 
 	if err := r.Status().Update(ctx, trunk); err != nil {
+		if errors.IsConflict(err) {
+			return ctrl.Result{Requeue: true}, nil
+		}
 		return ctrl.Result{}, fmt.Errorf("updating status after update: %w", err)
 	}
 
@@ -227,6 +261,23 @@ func (r *SIPInboundTrunkReconciler) reconcileDelete(
 
 	log.Info("SIP inbound trunk deleted", "name", trunk.Name)
 	return ctrl.Result{}, nil
+}
+
+func findInboundTrunkByName(
+	ctx context.Context,
+	sipClient *lksdk.SIPClient,
+	name string,
+) (*livekit.SIPInboundTrunkInfo, error) {
+	resp, err := sipClient.ListSIPInboundTrunk(ctx, &livekit.ListSIPInboundTrunkRequest{})
+	if err != nil {
+		return nil, err
+	}
+	for _, t := range resp.Items {
+		if t != nil && t.Name == name {
+			return t, nil
+		}
+	}
+	return nil, nil
 }
 
 // ─── LiveKit request builders ────────────────────────────────────────────────
